@@ -1,0 +1,13 @@
+{
+  "name": "bujok-new",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Tribal Wars 자동화 - 재구축 (진짜 게임 트래픽 기반)",
+  "scripts": {
+    "capture": "node capture-samples.js"
+  },
+  "dependencies": {
+    "ssh2": "^1.17.0",
+    "ws": "^8.18.0"
+  }
+}

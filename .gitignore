@@ -1,0 +1,30 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Logs
+*.log
+bujok.log
+
+# Captured data (개인 게임 데이터, 용량 큼)
+samples/
+captchas/
+state/
+data/
+
+# Chrome 사용자 데이터 (쿠키/세션/캐시 — 개인정보!)
+.chrome-data/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 비밀번호/IP 포함된 SSH 배포 스크립트
+ssh-*.js
+
+# 기타 디버그/탐색 스크립트
+inspect-*.js

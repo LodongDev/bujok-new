@@ -8,6 +8,7 @@ const CDP = require('./lib/cdp');
 const { detectVillages } = require('./lib/farm');
 const { evaluate } = require('./lib/runtime');
 const { navigate, waitForLoad, sleep } = require('./lib/page');
+const { randInt } = require('./lib/human');
 const { getAvailableTroops } = require('./lib/place');
 const Scheduler = require('./lib/scheduler');
 const { scavengeAll } = require('./lib/scavenge');

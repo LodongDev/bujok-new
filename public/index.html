@@ -269,9 +269,11 @@ label { min-width: 70px; }
                 <button class="btn btn-small" onclick="addTrainWave()">추가</button>
                 <button class="btn btn-small" onclick="addCustomWave()" style="background:#16a085;color:#fff;">+ 직접 입력</button>
                 <button class="btn btn-small" onclick="autoNobleTrain()" style="background:#8e44ad;color:#fff;">👑 자동 노블 분산</button>
+                <button class="btn btn-small" onclick="autoEvenTrain()" style="background:#16a085;color:#fff;">⚔ 자동 균등 분산</button>
             </div>
             <div style="font-size:11px;color:#666;margin-top:4px;">
-                자동 노블 분산: 마을 노블 수만큼 웨이브 생성, 첫 웨이브에 모든 공성추+투석기 + 클리너/N, 각 웨이브에 노블 1개씩
+                <b>노블 분산</b>: 마을 노블 수만큼 웨이브, 첫 웨이브에 모든 공성추+투석기, 각 웨이브에 노블 1개<br>
+                <b>균등 분산</b>: 노블 없이 N웨이브 (입력) 균등 분배, 첫 웨이브에 모든 공성추+투석기
             </div>
         </div>
     </div>
@@ -1082,6 +1084,53 @@ function saveWaveEdit(i) {
     closeWaveEdit();
     renderTrainWaveList();
     updateTrainSummary();
+}
+
+// 자동 균등 분산 — 노블 없이 N웨이브로 모든 공격 병력 균등 분배
+// 첫 웨이브에 모든 공성추(ram) + 투석기(catapult) 배치 (트레인 헤드)
+async function autoEvenTrain() {
+    const checked = [...document.querySelectorAll('.train-village-cb:checked')];
+    if (checked.length === 0) { alert('출발 마을 선택'); return; }
+    const sid = parseInt(checked[0].value);
+
+    const nStr = prompt('웨이브 수 입력 (예: 4)', '4');
+    const N = parseInt(nStr);
+    if (!N || N < 1 || N > 20) { alert('1~20 사이 숫자 입력'); return; }
+
+    try {
+        const data = await api('GET', '/villages/' + sid + '/troops');
+        const av = data.troops || {};
+        const waves = [];
+        for (let i = 0; i < N; i++) {
+            const t = {};
+            // 첫 웨이브에 공성추 + 투석기 전부
+            if (i === 0) {
+                if (av.ram) t.ram = av.ram;
+                if (av.catapult) t.catapult = av.catapult;
+            }
+            // 공격 병력 N등분 (창/검/도끼/궁/경기/기궁/중기)
+            for (const u of ['spear','sword','axe','archer','light','marcher','heavy']) {
+                const total = av[u] || 0;
+                if (total === 0) continue;
+                const per = Math.floor(total / N);
+                const remainder = (i === N - 1) ? (total - per * (N - 1)) : per;
+                if (remainder > 0) t[u] = remainder;
+            }
+            // 노블 있으면 균등 분배 (옵션)
+            if (av.snob && av.snob > 0) {
+                const noblesPerWave = Math.floor(av.snob / N);
+                const extra = (i < (av.snob % N)) ? 1 : 0;
+                if (noblesPerWave + extra > 0) t.snob = noblesPerWave + extra;
+            }
+            waves.push({ name: `균등 W${i+1}`, troops: t });
+        }
+        _trainWaves = waves;
+        renderTrainWaveList();
+        updateTrainSummary();
+        const summary = `자동 균등 분산: ${N}웨이브, 첫 웨이브에 공성추${av.ram||0}+투석기${av.catapult||0}` +
+            (av.snob ? `, 노블 ${av.snob}개 분배` : '');
+        alert(summary);
+    } catch (e) { alert('실패: ' + e.message); }
 }
 
 // 자동 노블 트레인 분산

@@ -815,19 +815,29 @@ function applyTemplate() {
     const id = document.getElementById('templateSelect').value;
     if (!id) return;
     const tpl = _templates.find(t => t.id === id);
-    if (!tpl) return;
-    // 현재 보유 병력으로 clamp
+    if (!tpl) { console.warn('템플릿 ID 못 찾음:', id, '— 새로고침 필요할 수 있음'); return; }
+    // 보유 병력 동기화 안 됐으면 (availableTroops 비었으면) 템플릿 값 그대로 — 0으로 강제 안 함
+    const synced = availableTroops && Object.keys(availableTroops).filter(k => k !== '_loading').length > 0;
     for (const u of UNIT_ORDER) {
         const want = tpl.troops[u] || 0;
-        const have = availableTroops[u] || 0;
-        const use = Math.min(want, have);
         const input = document.getElementById('troop_' + u);
-        if (input) input.value = use;
+        if (!input) continue;
+        if (synced) {
+            // 보유량으로 clamp
+            const have = availableTroops[u] || 0;
+            input.value = Math.min(want, have);
+        } else {
+            // 동기화 실패 시 템플릿 값 그대로 (서버 단 또 clamp 함)
+            input.value = want;
+        }
     }
+    console.log('[템플릿적용]', tpl.name, synced ? '(보유로 clamp)' : '(원본 그대로 — 보유 미동기화)');
 }
 
-function openTemplateEditor() {
+async function openTemplateEditor() {
     document.getElementById('templateModal').classList.remove('hidden');
+    // 항상 최신 템플릿 받아오기 (서버 변경 반영)
+    await loadTemplates();
     renderTemplateList();
     renderTemplateTroopsGrid();
     resetTemplateForm();
@@ -836,8 +846,13 @@ function closeTemplateEditor() {
     document.getElementById('templateModal').classList.add('hidden');
 }
 function resetTemplateForm() {
-    document.getElementById('tplId').value = '';
-    document.getElementById('tplName').value = '';
+    const tid = document.getElementById('tplId');
+    const tname = document.getElementById('tplName');
+    if (tid) tid.value = '';
+    if (tname) tname.value = '';
+    // grid가 사라졌으면 재생성 (방어적)
+    const grid = document.getElementById('tplTroopsGrid');
+    if (grid && !grid.querySelector('input')) renderTemplateTroopsGrid();
     for (const u of UNIT_ORDER) {
         const inp = document.getElementById('tpl_troop_' + u);
         if (inp) inp.value = 0;
@@ -901,6 +916,8 @@ async function deleteTemplate(id) {
     try {
         await api('DELETE', '/templates/' + id);
         await loadTemplates();
+        // 삭제 후 폼 리셋 — 안 그러면 삭제된 ID가 박제되어 "저장" 시 부활
+        resetTemplateForm();
     } catch (e) { alert('삭제 실패: ' + e.message); }
 }
 

@@ -1185,15 +1185,15 @@ function onTrainModeChange() {
 function updateTrainSummary() {
     const sources = document.querySelectorAll('.train-village-cb:checked').length;
     const txt = document.getElementById('trainTargets')?.value || '';
-    // 구분자 무관 — X|Y 패턴 전부 카운트 (중복 제거)
     const matches = [...txt.matchAll(/(\d{2,3})\s*\|\s*(\d{2,3})/g)];
     const uniq = new Set(matches.map(m => `${m[1]}|${m[2]}`));
     const targets = uniq.size;
     const waves = _trainWaves.length;
-    const total = sources * targets * waves;
+    // 마을 × 웨이브 = 총 공격 수 (타겟은 랜덤 셔플+순환 분배)
+    const total = sources * waves;
     const el = document.getElementById('trainSummary');
     if (el) {
-        el.innerHTML = `<span style="color:#aaa;">📊 요약:</span> 마을 <b>${sources}</b> × 타겟 <b>${targets}</b> × 웨이브 <b>${waves}</b> = <b style="color:${total>0?'#27ae60':'#888'};">${total}개 공격</b>`;
+        el.innerHTML = `<span style="color:#aaa;">📊 요약:</span> 마을 <b>${sources}</b> × 웨이브 <b>${waves}</b> = <b style="color:${total>0?'#27ae60':'#888'};">${total}개 공격</b> <span style="color:#888;font-size:11px;">(타겟 ${targets}개에 랜덤 분배)</span>`;
     }
 }
 
@@ -1225,7 +1225,8 @@ async function fireTrain() {
     const status = document.getElementById('trainStatus');
 
     if (mode === 'immediate') {
-        if (!confirm(`즉시 발사: ${sourceVillageIds.length}마을 × ${targets.length}타겟 × ${waves.length}웨이브 = ${sourceVillageIds.length*targets.length*waves.length}회. 진행?`)) return;
+        const totalAttacks = sourceVillageIds.length * waves.length;
+        if (!confirm(`즉시 발사: ${sourceVillageIds.length}마을 × ${waves.length}웨이브 = ${totalAttacks}회 (타겟 ${targets.length}개에 랜덤 분배). 진행?`)) return;
         status.textContent = '발사 중...';
         try {
             const r = await api('POST', '/train/immediate', { sourceVillageIds, targets, waves, type });

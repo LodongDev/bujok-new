@@ -1141,19 +1141,24 @@ function startServer() {
                 try { villageBudget[sid] = await getTroopsForVillage(sid); }
                 catch { villageBudget[sid] = {}; }
             }
+            // 마을 × 웨이브 = 총 공격 수, 타겟은 셔플+순환 랜덤 분배
+            const shuffledImmTargets = [...targets].sort(() => Math.random() - 0.5);
+            const totalAttacks = sourceVillageIds.length * waves.length;
             // 응답을 빨리 보내고 백그라운드에서 발사 (사용자 화면 안 멈춤)
-            json(res, { success: true, message: '백그라운드에서 발사 시작', count: sourceVillageIds.length * targets.length * waves.length });
+            json(res, { success: true, message: '백그라운드에서 발사 시작', count: totalAttacks });
             // 실제 발사 — 비동기
             (async () => {
                 const baseUrl = `https://${state.server}.tribalwars.net`;
                 let fireSent = 0, fireSkipped = 0, fireFailed = 0;
                 const lastMouse = { x: 500, y: 300 };
+                let jobIdx = 0;
                 for (const sid of sourceVillageIds) {
                     const sv = state.villages.find(v => v.id === sid);
                     if (!sv) continue;
-                    for (const t of targets) {
-                        for (let w = 0; w < waves.length; w++) {
-                            const tpl = waves[w];
+                    for (let w = 0; w < waves.length; w++) {
+                        const t = shuffledImmTargets[jobIdx % shuffledImmTargets.length];
+                        jobIdx++;
+                        const tpl = waves[w];
                             const budget = villageBudget[sid] || {};
                             const troops = {};
                             let total = 0;
@@ -1186,7 +1191,6 @@ function startServer() {
                                 fireFailed++;
                                 log.warn(`[트레인즉시] ${sv.name}→(${t.x}|${t.y}) 실패: ${e.message}`);
                             }
-                        }
                     }
                 }
                 log.info(`[트레인즉시] 완료 — 발사 ${fireSent}, 스킵 ${fireSkipped}, 실패 ${fireFailed}`);
@@ -1221,15 +1225,18 @@ function startServer() {
                 catch { villageBudget[sid] = {}; }
             }
 
-            // 모든 (source × target × wave) 조합
+            // 마을 × 웨이브 = 총 공격 수, 타겟은 랜덤 분배 (셔플+순환)
+            // 예: 4마을 × 1웨이브 = 4공격, 타겟 3개 → 셔플된 타겟 리스트 cycling
+            const shuffledTargets = [...targets].sort(() => Math.random() - 0.5);
             const jobs = [];
+            let jobIdx = 0;
             for (const sid of sourceVillageIds) {
                 const sv = state.villages.find(v => v.id === sid);
                 if (!sv) continue;
-                for (const t of targets) {
-                    for (let waveIdx = 0; waveIdx < waves.length; waveIdx++) {
-                        jobs.push({ sourceVillage: sv, target: t, template: waves[waveIdx], waveIdx });
-                    }
+                for (let waveIdx = 0; waveIdx < waves.length; waveIdx++) {
+                    const t = shuffledTargets[jobIdx % shuffledTargets.length];
+                    jobs.push({ sourceVillage: sv, target: t, template: waves[waveIdx], waveIdx });
+                    jobIdx++;
                 }
             }
             if (!jobs.length) { json(res, { success: false, error: '유효한 조합 없음' }); return; }

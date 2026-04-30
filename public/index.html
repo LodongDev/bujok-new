@@ -63,6 +63,40 @@ select { min-width: 200px; }
 
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
 .hidden { display: none; }
+
+/* === 탭 네비게이션 === */
+.tab-nav { display: flex; gap: 2px; margin: 20px 0 0 0; border-bottom: 2px solid #16213e; }
+.tab-nav button { padding: 10px 20px; background: #16213e; color: #aaa; border: none; cursor: pointer; font-size: 14px; font-weight: 500; border-radius: 8px 8px 0 0; transition: all 0.15s; }
+.tab-nav button:hover { background: #1f2c4d; color: #fff; }
+.tab-nav button.active { background: #0f3460; color: #fff; border-bottom: 2px solid #e94560; margin-bottom: -2px; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* === 카드 스타일 (h2 + panel 통합) === */
+.card { background: #16213e; border-radius: 8px; margin: 16px 0; overflow: hidden; }
+.card-header { padding: 12px 16px; background: #1c2848; font-size: 15px; font-weight: 600; color: #e0e0e0; display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; }
+.card-header:hover { background: #213056; }
+.card-header .toggle-icon { font-size: 12px; color: #888; transition: transform 0.2s; }
+.card-header.collapsed .toggle-icon { transform: rotate(-90deg); }
+.card-body { padding: 16px; }
+.card-body.collapsed { display: none; }
+.card-section-title { font-size: 13px; color: #888; margin: 12px 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* === 모드 선택 === */
+.mode-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.mode-tabs button { flex: 1; padding: 8px 12px; background: #0f3460; color: #aaa; border: 1px solid #233358; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.mode-tabs button.active { background: #e94560; color: #fff; border-color: #e94560; }
+.mode-tabs button:hover:not(.active) { background: #1f3a6e; color: #fff; }
+
+/* === 칩 (마을 체크박스) === */
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chips label { font-size: 12px; padding: 4px 8px; background: #0f3460; border-radius: 12px; cursor: pointer; min-width: auto; }
+.chips label:has(input:checked) { background: #e94560; color: #fff; }
+.chips input[type="checkbox"] { display: none; }
+
+/* === 입력 한 줄 정리 === */
+.row { gap: 8px; margin-bottom: 8px; }
+label { min-width: 70px; }
 </style>
 </head>
 <body>
@@ -71,6 +105,7 @@ select { min-width: 200px; }
     <h1 style="margin:0;">Bujok</h1>
     <div id="headerActions" class="hidden">
         <span id="currentServerBadge" style="font-size:13px;color:#aaa;margin-right:10px;"></span>
+        <button class="btn btn-small" id="pauseBtn" style="background:#d4900f;color:#fff;margin-right:6px;" onclick="togglePause()">⏸ 일시정지</button>
         <button class="btn btn-small" style="background:#0f3460;color:#aaa;" onclick="changeServer()">다른 서버</button>
         <button class="btn btn-small" style="background:#7a2727;color:#fff;" onclick="logout()">로그아웃</button>
     </div>
@@ -132,6 +167,15 @@ select { min-width: 200px; }
 <!-- 메인 대시보드 (phase=ready) -->
 <div id="mainPanel" class="hidden">
 
+<div class="tab-nav">
+    <button class="active" onclick="switchTab('attack')" id="navAttack">⚔ 공격</button>
+    <button onclick="switchTab('auto')" id="navAuto">🤖 자동화</button>
+    <button onclick="switchTab('schedule')" id="navSchedule">📋 예약 목록</button>
+</div>
+
+<!-- ⚔ 공격 탭 (단일 + 트레인) -->
+<div class="tab-content active" id="tabAttack">
+
 <h2>새 예약</h2>
 <div class="panel">
     <div class="type-toggle">
@@ -141,9 +185,21 @@ select { min-width: 200px; }
 
     <div class="row">
         <label>출발 마을</label>
-        <select id="sourceVillage" onchange="onVillageChange()">
+        <select id="sourceVillage" onchange="onVillageChange()" style="flex:1;">
             <option value="">로딩 중...</option>
         </select>
+        <button class="btn btn-small" onclick="refreshVillages()" title="마을 목록 재감지">🔄</button>
+    </div>
+    <div id="villageTroopsBox" style="margin: 8px 0 12px 100px; padding: 8px 12px; background: #0a1428; border-radius: 6px; font-size: 12px; color: #888;">
+        마을 선택 시 보유 병력 표시
+    </div>
+
+    <div class="row">
+        <label>템플릿</label>
+        <select id="templateSelect" onchange="applyTemplate()" style="flex:1;">
+            <option value="">-- 직접 입력 --</option>
+        </select>
+        <button class="btn btn-small" onclick="openTemplateEditor()">📝 관리</button>
     </div>
 
     <div class="row">
@@ -183,6 +239,81 @@ select { min-width: 200px; }
         <button class="btn btn-primary" id="scheduleBtn" onclick="scheduleAttack()">⚔ 공격 예약</button>
     </div>
 </div>
+
+<h2>🚂 트레인 (다중 공격)</h2>
+<div class="panel">
+    <p style="font-size:12px;color:#888;margin-top:0;">
+        여러 마을 → 여러 타겟 → 여러 웨이브. 즉시/시간창/노블 트레인 모드.
+    </p>
+    <div class="row">
+        <label>타입</label>
+        <select id="trainType" style="flex:1;max-width:200px;">
+            <option value="attack">⚔ 공격</option>
+            <option value="support">🛡 원군</option>
+        </select>
+    </div>
+    <div class="row">
+        <label>출발 마을</label>
+        <div class="chips" id="trainSourceVillages" style="flex:1;">
+            <span style="color:#666;">마을 로딩...</span>
+        </div>
+    </div>
+    <div class="row" style="align-items:flex-start;">
+        <label style="padding-top:8px;">웨이브 구성</label>
+        <div style="flex:1;">
+            <div id="trainWaveList" style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;"></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                <select id="trainAddWave" style="flex:1;min-width:160px;">
+                    <option value="">+ 템플릿 웨이브 추가</option>
+                </select>
+                <button class="btn btn-small" onclick="addTrainWave()">추가</button>
+                <button class="btn btn-small" onclick="addCustomWave()" style="background:#16a085;color:#fff;">+ 직접 입력</button>
+                <button class="btn btn-small" onclick="autoNobleTrain()" style="background:#8e44ad;color:#fff;">👑 자동 노블 분산</button>
+            </div>
+            <div style="font-size:11px;color:#666;margin-top:4px;">
+                자동 노블 분산: 마을 노블 수만큼 웨이브 생성, 첫 웨이브에 모든 공성추+투석기 + 클리너/N, 각 웨이브에 노블 1개씩
+            </div>
+        </div>
+    </div>
+    <div class="row" style="align-items:flex-start;">
+        <label style="padding-top:8px;">타겟 좌표</label>
+        <textarea id="trainTargets" rows="3" style="flex:1;background:#0f3460;color:#eee;border:1px solid #233358;padding:8px;font-family:monospace;border-radius:4px;" placeholder="X|Y 형식, 구분자 자유 (쉼표/공백/줄바꿈 모두 OK)
+예: 523|565, 524|566 525|567
+531|561"></textarea>
+    </div>
+    <div class="row">
+        <label>발사 모드</label>
+        <select id="trainMode" onchange="onTrainModeChange()" style="flex:1;max-width:300px;">
+            <option value="immediate">⚡ 즉시 발사 (따따따닥)</option>
+            <option value="scheduled">⏰ 시간창 분산 (랜덤 셔플)</option>
+            <option value="noble">👑 노블 트레인 (정밀 간격)</option>
+        </select>
+    </div>
+    <div class="row" id="trainTimeRow" style="display:none;">
+        <label>도착 시작</label>
+        <input type="datetime-local" id="trainArrivalStart" step="1">
+        <label style="margin-left:10px;min-width:auto;">종료</label>
+        <input type="datetime-local" id="trainArrivalEnd" step="1">
+    </div>
+    <div class="row" id="trainNobleRow" style="display:none;">
+        <label>첫 도착</label>
+        <input type="datetime-local" id="trainNobleStart" step="1">
+        <label style="margin-left:10px;min-width:auto;">간격(ms)</label>
+        <input type="number" id="trainNobleSpacing" value="250" min="50" max="5000" style="width:80px;">
+    </div>
+    <div id="trainSummary" style="margin: 10px 0; padding: 8px 12px; background: #0f3460; border-left: 3px solid #3498db; border-radius: 4px; font-size: 12px;">
+        <span style="color:#aaa;">📊 요약:</span> 마을 0 × 타겟 0 × 웨이브 0 = <b style="color:#fff;">0개 공격</b>
+    </div>
+    <div class="row">
+        <button class="btn btn-primary" id="trainFireBtn" onclick="fireTrain()">🚂 트레인 발사</button>
+        <span id="trainStatus" style="margin-left:10px;font-size:12px;color:#888;"></span>
+    </div>
+</div>
+
+</div><!-- /tabAttack -->
+
+<!-- 🤖 자동화 탭 -->
+<div class="tab-content" id="tabAuto">
 
 <h2>스캐빈징</h2>
 <div class="panel">
@@ -309,14 +440,53 @@ select { min-width: 200px; }
     <div id="farmResults" style="margin-top:12px;"></div>
 </div>
 
-<h2>예약 목록</h2>
+</div><!-- /tabAuto -->
+
+<!-- 📋 예약 목록 탭 -->
+<div class="tab-content" id="tabSchedule">
+
+<h2>예약 공격</h2>
 <div class="panel">
+    <div style="display:flex;gap:8px;margin-bottom:12px;border-bottom:1px solid #1a1a2e;">
+        <button class="btn btn-small tab-active" id="tabActive" onclick="switchScheduleTab('active')">🔴 진행중 <span id="activeCount" style="opacity:0.7;"></span></button>
+        <button class="btn btn-small" id="tabHistory" onclick="switchScheduleTab('history')">📜 기록 <span id="historyCount" style="opacity:0.7;"></span></button>
+    </div>
     <div class="scheduled-list" id="scheduledList">
         <div style="color:#666; text-align:center; padding:20px;">예약 없음</div>
     </div>
 </div>
 
+</div><!-- /tabSchedule -->
+<style>
+    .btn.tab-active { background: #3498db !important; color: white; }
+</style>
+
 </div><!-- end mainPanel -->
+
+<!-- 템플릿 편집 모달 -->
+<style>
+    .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center; display:flex; }
+    .modal-overlay.hidden { display:none !important; }
+</style>
+<div id="templateModal" class="modal-overlay hidden">
+    <div style="background:#1a1a2e;border-radius:8px;padding:20px;width:520px;max-width:95%;max-height:90vh;overflow:auto;">
+        <h3 style="margin-top:0;">📝 공격 템플릿 관리</h3>
+        <div id="templateList" style="margin-bottom:16px;max-height:200px;overflow-y:auto;"></div>
+        <hr style="border-color:#333;">
+        <h4>새 템플릿 만들기 / 수정</h4>
+        <div class="row">
+            <label>이름</label>
+            <input type="text" id="tplName" placeholder="예: 풀공격, 동줍" style="flex:1;">
+        </div>
+        <input type="hidden" id="tplId">
+        <div class="troops-grid" id="tplTroopsGrid" style="margin:12px 0;"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+            <button class="btn" onclick="resetTemplateForm()">초기화</button>
+            <button class="btn btn-primary" onclick="saveTemplate()">저장</button>
+            <button class="btn" onclick="closeTemplateEditor()">닫기</button>
+        </div>
+    </div>
+</div>
 
 <div class="status-bar">
     <div><span class="status-dot" id="statusDot"></span><span id="statusText">연결 중...</span></div>
@@ -354,6 +524,7 @@ async function checkState() {
         } else if (s.phase === 'ready') {
             setDefaultTime();
             await loadVillages();
+            await loadTemplates();
             await syncQueueStates();   // 복원된 큐 상태를 UI에 반영
             startPolling();
         }
@@ -365,12 +536,14 @@ async function checkState() {
 // 서버 재시작/자동연결 후 복원된 큐들의 실행 상태를 UI에 반영
 async function syncQueueStates() {
     try {
-        const [scav, mkt, farm, trainer] = await Promise.all([
+        const [s, scav, mkt, farm, trainer] = await Promise.all([
+            api('GET', '/state').catch(() => null),
             api('GET', '/scavenge/status').catch(() => null),
             api('GET', '/market/status').catch(() => null),
             api('GET', '/farm/status').catch(() => null),
             api('GET', '/trainer/status').catch(() => null),
         ]);
+        if (s) updatePauseBtn(!!s.userPaused);
         if (scav && !scav.stopped && (scav.size > 0 || scav.running)) {
             document.getElementById('scavStopBtn').className = 'btn btn-danger btn-small';
             const st = document.getElementById('scavStatus');
@@ -524,10 +697,37 @@ function setDefaultTime() {
 // ==========================================
 // API 호출
 // ==========================================
+// 서버 시작 시각 — 첫 응답에서 받아 저장
+let _knownServerStartedAt = null;
+
 async function api(method, path, body) {
-    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    const opts = { method, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' } };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch('/api' + path, opts);
+
+    // 서버 재시작 감지 — startedAt 헤더 비교
+    const startedAt = res.headers.get('X-Server-Started-At');
+    if (startedAt) {
+        const at = parseInt(startedAt);
+        if (_knownServerStartedAt === null) {
+            _knownServerStartedAt = at;
+        } else if (at !== _knownServerStartedAt) {
+            // 서버가 재시작됨 → UI도 새로고침 (코드 변경/캐시 동기화)
+            console.warn(`[리로드] 서버 재시작 감지: ${_knownServerStartedAt} → ${at}`);
+            location.reload();
+            return new Promise(() => {}); // 영원히 대기 (페이지 리로드되니까)
+        }
+    }
+
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`JSON 아닌 응답: ${text.slice(0, 100)}`);
+    }
     return await res.json();
 }
 
@@ -546,6 +746,7 @@ async function loadVillages() {
         renderScavVillages();
         renderMktVillages();
         renderFarmVillages();
+        renderTrainSourceCheckboxes();
         await loadBuildPriorityFromServer();
         renderBuildVillageSelect();
         updateStatus(true);
@@ -560,10 +761,442 @@ async function onVillageChange() {
         const data = await api('GET', '/villages/' + vid + '/troops');
         availableTroops = data.troops || {};
         renderTroops();
+        renderVillageTroopsBox();
     } catch {
         availableTroops = {};
         renderTroops();
+        renderVillageTroopsBox();
     }
+}
+
+// 마을별 보유 병력 표시 박스
+function renderVillageTroopsBox() {
+    const el = document.getElementById('villageTroopsBox');
+    if (!el) return;
+    const entries = Object.entries(availableTroops || {}).filter(([,c]) => c > 0);
+    if (entries.length === 0) {
+        el.innerHTML = '<span style="color:#666;">보유 병력 없음</span>';
+        return;
+    }
+    el.innerHTML = '<strong style="color:#aaa;">보유:</strong> ' +
+        entries.map(([u,c]) => `<span style="margin-right:10px;color:#3498db;">${UNIT_NAMES[u]||u}:<b style="color:#fff;">${c}</b></span>`).join('');
+}
+
+// ==========================================
+// 템플릿 관리
+// ==========================================
+let _templates = [];
+
+async function loadTemplates() {
+    try {
+        const data = await api('GET', '/templates');
+        _templates = data.templates || [];
+        const sel = document.getElementById('templateSelect');
+        if (sel) {
+            sel.innerHTML = '<option value="">-- 직접 입력 --</option>' +
+                _templates.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+        }
+        syncTrainTemplateOptions();
+        renderTemplateList();
+    } catch (e) { console.warn('템플릿 로드 실패', e); }
+}
+
+function applyTemplate() {
+    const id = document.getElementById('templateSelect').value;
+    if (!id) return;
+    const tpl = _templates.find(t => t.id === id);
+    if (!tpl) return;
+    // 현재 보유 병력으로 clamp
+    for (const u of UNIT_ORDER) {
+        const want = tpl.troops[u] || 0;
+        const have = availableTroops[u] || 0;
+        const use = Math.min(want, have);
+        const input = document.getElementById('troop_' + u);
+        if (input) input.value = use;
+    }
+}
+
+function openTemplateEditor() {
+    document.getElementById('templateModal').classList.remove('hidden');
+    renderTemplateList();
+    renderTemplateTroopsGrid();
+    resetTemplateForm();
+}
+function closeTemplateEditor() {
+    document.getElementById('templateModal').classList.add('hidden');
+}
+function resetTemplateForm() {
+    document.getElementById('tplId').value = '';
+    document.getElementById('tplName').value = '';
+    for (const u of UNIT_ORDER) {
+        const inp = document.getElementById('tpl_troop_' + u);
+        if (inp) inp.value = 0;
+    }
+}
+function renderTemplateTroopsGrid() {
+    const grid = document.getElementById('tplTroopsGrid');
+    if (!grid) return;
+    grid.innerHTML = UNIT_ORDER.map(u => `
+        <div class="troop-item">
+            <label>${UNIT_NAMES[u] || u}</label>
+            <input type="number" id="tpl_troop_${u}" value="0" min="0">
+        </div>`).join('');
+}
+function renderTemplateList() {
+    const el = document.getElementById('templateList');
+    if (!el) return;
+    if (_templates.length === 0) {
+        el.innerHTML = '<div style="color:#666;text-align:center;">저장된 템플릿 없음</div>';
+        return;
+    }
+    el.innerHTML = _templates.map(t => {
+        const summary = Object.entries(t.troops||{}).filter(([,c]) => c > 0)
+            .map(([u,c]) => `${UNIT_NAMES[u]||u}:${c}`).join(' ');
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px;border-bottom:1px solid #333;">
+            <div><b>${t.name}</b><br><span style="font-size:11px;color:#888;">${summary}</span></div>
+            <div>
+                <button class="btn btn-small" onclick="editTemplate('${t.id}')">수정</button>
+                <button class="btn btn-small btn-danger" onclick="deleteTemplate('${t.id}')">삭제</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+function editTemplate(id) {
+    const tpl = _templates.find(t => t.id === id);
+    if (!tpl) return;
+    document.getElementById('tplId').value = tpl.id;
+    document.getElementById('tplName').value = tpl.name;
+    for (const u of UNIT_ORDER) {
+        const inp = document.getElementById('tpl_troop_' + u);
+        if (inp) inp.value = tpl.troops[u] || 0;
+    }
+}
+async function saveTemplate() {
+    const name = document.getElementById('tplName').value.trim();
+    if (!name) { alert('이름 입력'); return; }
+    const id = document.getElementById('tplId').value || null;
+    const troops = {};
+    for (const u of UNIT_ORDER) {
+        const v = parseInt(document.getElementById('tpl_troop_' + u)?.value || '0');
+        if (v > 0) troops[u] = v;
+    }
+    try {
+        await api('POST', '/templates', { id, name, troops });
+        await loadTemplates();
+        resetTemplateForm();
+    } catch (e) { alert('저장 실패: ' + e.message); }
+}
+async function deleteTemplate(id) {
+    if (!confirm('템플릿 삭제?')) return;
+    try {
+        await api('DELETE', '/templates/' + id);
+        await loadTemplates();
+    } catch (e) { alert('삭제 실패: ' + e.message); }
+}
+
+// ==========================================
+// 마을 새로고침
+// ==========================================
+async function refreshVillages() {
+    try {
+        const r = await api('POST', '/villages/refresh');
+        if (r.success) {
+            villages = r.villages || [];
+            renderVillageDropdowns();
+            renderTrainSourceCheckboxes();
+        } else {
+            alert('마을 새로고침 실패: ' + (r.error || ''));
+        }
+    } catch (e) { alert('실패: ' + e.message); }
+}
+
+function renderVillageDropdowns() {
+    // 기존 sourceVillage select 갱신
+    const sel = document.getElementById('sourceVillage');
+    if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = villages.map(v =>
+            `<option value="${v.id}">${v.name} (${v.x}|${v.y})</option>`).join('');
+        if (cur) sel.value = cur;
+    }
+}
+
+// ==========================================
+// 트레인 (다중 공격) UI
+// ==========================================
+function renderTrainSourceCheckboxes() {
+    const el = document.getElementById('trainSourceVillages');
+    if (!el) return;
+    if (!villages.length) { el.innerHTML = '<span style="color:#666;">마을 없음</span>'; return; }
+    el.innerHTML = `<a href="#" onclick="toggleTrainAll(true);return false" style="font-size:11px;color:#27ae60;margin-right:4px;">전체</a>
+        <a href="#" onclick="toggleTrainAll(false);return false" style="font-size:11px;color:#888;margin-right:8px;">해제</a>` +
+        villages.map(v =>
+            `<label style="font-size:12px;padding:2px 6px;background:#0f3460;border-radius:4px;">
+                <input type="checkbox" class="train-village-cb" value="${v.id}" onchange="updateTrainSummary()"> ${v.name}
+            </label>`).join(' ');
+    // 타겟 textarea 변화에도 요약 갱신
+    const tt = document.getElementById('trainTargets');
+    if (tt && !tt._summaryHooked) {
+        tt.addEventListener('input', updateTrainSummary);
+        tt._summaryHooked = true;
+    }
+    updateTrainSummary();
+}
+function toggleTrainAll(on) {
+    document.querySelectorAll('.train-village-cb').forEach(cb => cb.checked = on);
+    updateTrainSummary();
+}
+
+function syncTrainTemplateOptions() {
+    const sel = document.getElementById('trainAddWave');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">+ 웨이브 추가 (템플릿)</option>' +
+        _templates.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+}
+
+// 웨이브 = { name, troops: {spear:N, ...} }
+// templateId는 더 이상 사용 안 함 (생성 시 troops로 변환)
+let _trainWaves = [];
+
+function troopsSummary(troops) {
+    const entries = Object.entries(troops || {}).filter(([,c]) => c > 0);
+    if (entries.length === 0) return '<span style="color:#666;">병력 0</span>';
+    return entries.map(([u,c]) => `${UNIT_NAMES[u]||u}:${c}`).join(' ');
+}
+
+function renderTrainWaveList() {
+    const el = document.getElementById('trainWaveList');
+    if (!el) return;
+    if (_trainWaves.length === 0) {
+        el.innerHTML = '<span style="color:#666;font-size:11px;">웨이브 없음 — 템플릿 추가 또는 자동 노블 분산</span>';
+        return;
+    }
+    el.innerHTML = _trainWaves.map((w, i) =>
+        `<div style="display:flex;align-items:center;gap:6px;background:#0f3460;padding:6px 10px;border-radius:4px;font-size:12px;">
+            <span style="color:#3498db;font-weight:bold;min-width:30px;">W${i+1}</span>
+            <span style="flex:1;">
+                <b>${w.name}</b>
+                <span style="color:#888;font-size:11px;margin-left:6px;">${troopsSummary(w.troops)}</span>
+            </span>
+            <button class="btn btn-small" onclick="editWave(${i})">수정</button>
+            <button class="btn btn-small btn-danger" onclick="removeTrainWave(${i})">x</button>
+        </div>`).join('');
+}
+function addTrainWave() {
+    const sel = document.getElementById('trainAddWave');
+    const id = sel.value;
+    if (!id) return;
+    const tpl = _templates.find(t => t.id === id);
+    if (!tpl) return;
+    _trainWaves.push({ name: tpl.name, troops: { ...tpl.troops } });
+    sel.value = '';
+    renderTrainWaveList();
+    updateTrainSummary();
+}
+function addCustomWave() {
+    const name = `직접 입력 ${_trainWaves.length + 1}`;
+    _trainWaves.push({ name, troops: {} });
+    renderTrainWaveList();
+    updateTrainSummary();
+    editWave(_trainWaves.length - 1);
+}
+function removeTrainWave(i) {
+    _trainWaves.splice(i, 1);
+    renderTrainWaveList();
+    updateTrainSummary();
+}
+
+// 직접 입력 모달
+function editWave(i) {
+    const w = _trainWaves[i];
+    if (!w) return;
+    let modal = document.getElementById('waveEditModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'waveEditModal';
+        modal.className = 'modal-overlay hidden';
+        document.body.appendChild(modal);
+    }
+    modal.innerHTML = `
+        <div style="background:#1a1a2e;border-radius:8px;padding:20px;width:520px;max-width:95%;">
+            <h3 style="margin-top:0;">웨이브 ${i+1} 병력 편집</h3>
+            <div class="row">
+                <label>이름</label>
+                <input type="text" id="waveEditName" value="${w.name}" style="flex:1;">
+            </div>
+            <div class="troops-grid" id="waveEditGrid" style="margin:12px 0;"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <button class="btn" onclick="closeWaveEdit()">취소</button>
+                <button class="btn btn-primary" onclick="saveWaveEdit(${i})">저장</button>
+            </div>
+        </div>`;
+    modal.classList.remove('hidden');
+    const grid = document.getElementById('waveEditGrid');
+    grid.innerHTML = UNIT_ORDER.map(u => `
+        <div class="troop-item">
+            <label>${UNIT_NAMES[u] || u}</label>
+            <input type="number" id="waveEdit_${u}" value="${w.troops[u] || 0}" min="0">
+        </div>`).join('');
+}
+function closeWaveEdit() {
+    const m = document.getElementById('waveEditModal');
+    if (m) m.classList.add('hidden');
+}
+function saveWaveEdit(i) {
+    const w = _trainWaves[i];
+    if (!w) return closeWaveEdit();
+    w.name = document.getElementById('waveEditName').value || `웨이브 ${i+1}`;
+    const troops = {};
+    for (const u of UNIT_ORDER) {
+        const v = parseInt(document.getElementById('waveEdit_' + u)?.value || '0');
+        if (v > 0) troops[u] = v;
+    }
+    w.troops = troops;
+    closeWaveEdit();
+    renderTrainWaveList();
+    updateTrainSummary();
+}
+
+// 자동 노블 트레인 분산
+// 룰:
+//  - 노블 N개 → N개 웨이브 생성, 각 웨이브에 노블 1
+//  - 공성추(ram) + 투석기(catapult) → 전부 첫 웨이브
+//  - 클리너(spear/sword/axe/light/heavy) → N등분
+async function autoNobleTrain() {
+    const checked = [...document.querySelectorAll('.train-village-cb:checked')];
+    if (checked.length === 0) { alert('출발 마을 선택 (자동 노블 분산은 첫 마을 병력 기준)'); return; }
+    const sid = parseInt(checked[0].value);
+    try {
+        const data = await api('GET', '/villages/' + sid + '/troops');
+        const av = data.troops || {};
+        const nobles = av.snob || 0;
+        if (nobles === 0) { alert('첫 마을에 노블이 없습니다'); return; }
+        const N = nobles;
+        const waves = [];
+        for (let i = 0; i < N; i++) {
+            const t = { snob: 1 };
+            if (i === 0) {
+                if (av.ram) t.ram = av.ram;
+                if (av.catapult) t.catapult = av.catapult;
+            }
+            // 클리너 N등분
+            for (const u of ['spear','sword','axe','archer','light','marcher','heavy']) {
+                const total = av[u] || 0;
+                if (total === 0) continue;
+                const per = Math.floor(total / N);
+                const remainder = (i === N - 1) ? (total - per * (N - 1)) : per;
+                if (remainder > 0) t[u] = remainder;
+            }
+            waves.push({ name: `노블 W${i+1}`, troops: t });
+        }
+        _trainWaves = waves;
+        renderTrainWaveList();
+        updateTrainSummary();
+        alert(`자동 분산 완료: ${N}웨이브 (노블 ${N}, 첫 웨이브에 공성추${av.ram||0}+투석기${av.catapult||0})`);
+    } catch (e) { alert('실패: ' + e.message); }
+}
+
+function onTrainModeChange() {
+    const mode = document.getElementById('trainMode').value;
+    document.getElementById('trainTimeRow').style.display = mode === 'scheduled' ? '' : 'none';
+    document.getElementById('trainNobleRow').style.display = mode === 'noble' ? '' : 'none';
+    const btn = document.getElementById('trainFireBtn');
+    if (mode === 'immediate') btn.textContent = '⚡ 즉시 발사';
+    else if (mode === 'scheduled') btn.textContent = '⏰ 시간창 예약';
+    else btn.textContent = '👑 노블 트레인 예약';
+}
+
+function updateTrainSummary() {
+    const sources = document.querySelectorAll('.train-village-cb:checked').length;
+    const txt = document.getElementById('trainTargets')?.value || '';
+    // 구분자 무관 — X|Y 패턴 전부 카운트 (중복 제거)
+    const matches = [...txt.matchAll(/(\d{2,3})\s*\|\s*(\d{2,3})/g)];
+    const uniq = new Set(matches.map(m => `${m[1]}|${m[2]}`));
+    const targets = uniq.size;
+    const waves = _trainWaves.length;
+    const total = sources * targets * waves;
+    const el = document.getElementById('trainSummary');
+    if (el) {
+        el.innerHTML = `<span style="color:#aaa;">📊 요약:</span> 마을 <b>${sources}</b> × 타겟 <b>${targets}</b> × 웨이브 <b>${waves}</b> = <b style="color:${total>0?'#27ae60':'#888'};">${total}개 공격</b>`;
+    }
+}
+
+async function fireTrain() {
+    const sourceVillageIds = [...document.querySelectorAll('.train-village-cb:checked')]
+        .map(cb => parseInt(cb.value));
+    if (sourceVillageIds.length === 0) { alert('출발 마을 선택'); return; }
+
+    if (_trainWaves.length === 0) { alert('웨이브 1개 이상 추가'); return; }
+    // 각 웨이브는 {name, troops} 직접 전송
+    const waves = _trainWaves.map(w => ({ name: w.name, troops: w.troops }));
+
+    const txt = document.getElementById('trainTargets').value.trim();
+    if (!txt) { alert('타겟 좌표 입력'); return; }
+    // 구분자 무관 — X|Y 패턴 전부 추출 (쉼표, 공백, 줄바꿈 등 모두 OK)
+    const matches = [...txt.matchAll(/(\d{2,3})\s*\|\s*(\d{2,3})/g)];
+    const seen = new Set();
+    const targets = [];
+    for (const m of matches) {
+        const k = `${m[1]}|${m[2]}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        targets.push({ x: parseInt(m[1]), y: parseInt(m[2]) });
+    }
+    if (!targets.length) { alert('유효한 좌표 없음 (예: 523|565)'); return; }
+
+    const type = document.getElementById('trainType').value;
+    const mode = document.getElementById('trainMode').value;
+    const status = document.getElementById('trainStatus');
+
+    if (mode === 'immediate') {
+        if (!confirm(`즉시 발사: ${sourceVillageIds.length}마을 × ${targets.length}타겟 × ${waves.length}웨이브 = ${sourceVillageIds.length*targets.length*waves.length}회. 진행?`)) return;
+        status.textContent = '발사 중...';
+        try {
+            const r = await api('POST', '/train/immediate', { sourceVillageIds, targets, waves, type });
+            if (r.success) {
+                status.textContent = `✅ ${r.count}회 백그라운드 발사 시작 (로그 확인)`;
+            } else { status.textContent = '실패: ' + (r.error || ''); }
+        } catch (e) { status.textContent = '실패: ' + e.message; }
+        return;
+    }
+
+    // 예약 (window/noble) 모드
+    let arrivalStartIso, arrivalEndIso, distMode, spacingMs;
+    if (mode === 'noble') {
+        const start = document.getElementById('trainNobleStart').value;
+        if (!start) { alert('첫 도착시각 입력'); return; }
+        spacingMs = parseInt(document.getElementById('trainNobleSpacing').value) || 250;
+        const total = sourceVillageIds.length * targets.length * waves.length;
+        const startMs = new Date(start).getTime();
+        arrivalStartIso = new Date(startMs).toISOString();
+        arrivalEndIso = new Date(startMs + spacingMs * total + 1000).toISOString(); // 종료는 충분히 뒤로
+        distMode = 'sequence';
+    } else {
+        const start = document.getElementById('trainArrivalStart').value;
+        const end = document.getElementById('trainArrivalEnd').value;
+        if (!start || !end) { alert('도착 시간 범위 입력'); return; }
+        if (new Date(end) <= new Date(start)) { alert('종료가 시작보다 늦어야 함'); return; }
+        arrivalStartIso = new Date(start).toISOString();
+        arrivalEndIso = new Date(end).toISOString();
+        distMode = 'window';
+    }
+
+    status.textContent = '예약 중...';
+    try {
+        const r = await api('POST', '/schedule/train', {
+            sourceVillageIds, targets, waves,
+            arrivalStart: arrivalStartIso,
+            arrivalEnd: arrivalEndIso,
+            distMode, spacingMs,
+            type,
+        });
+        if (r.success) {
+            const ok = (r.scheduled || []).filter(s => s.id).length;
+            const skip = (r.scheduled || []).filter(s => s.skipped).length;
+            status.textContent = `✅ ${ok}개 예약${skip > 0 ? ` (스킵 ${skip}: 병력)` : ''}`;
+            refreshList();
+        } else { status.textContent = '실패: ' + (r.error || ''); }
+    } catch (e) { status.textContent = '실패: ' + e.message; }
 }
 
 // ==========================================
@@ -649,14 +1282,49 @@ async function scheduleAttack() {
 // ==========================================
 // 예약 목록 갱신
 // ==========================================
+// 메인 탭 전환
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-nav button').forEach(b => b.classList.remove('active'));
+    const content = document.getElementById('tab' + name.charAt(0).toUpperCase() + name.slice(1));
+    if (content) content.classList.add('active');
+    const navBtn = document.getElementById('nav' + name.charAt(0).toUpperCase() + name.slice(1));
+    if (navBtn) navBtn.classList.add('active');
+}
+
+let _scheduleTab = 'active';
+function switchScheduleTab(tab) {
+    _scheduleTab = tab;
+    document.getElementById('tabActive').classList.toggle('tab-active', tab === 'active');
+    document.getElementById('tabHistory').classList.toggle('tab-active', tab === 'history');
+    refreshList();
+}
+
+const ACTIVE_STATUSES = new Set(['waiting', 'preparing', 'ready', 'firing']);
+const HISTORY_STATUSES = new Set(['done', 'failed', 'cancelled']);
+
 async function refreshList() {
     try {
         const data = await api('GET', '/scheduled');
-        const list = data.attacks || [];
+        const all = data.attacks || [];
+
+        const activeList = all.filter(a => ACTIVE_STATUSES.has(a.status));
+        const historyList = all.filter(a => HISTORY_STATUSES.has(a.status));
+        // 기록은 최신이 위로
+        historyList.sort((a, b) => (b.arrivalTime || 0) - (a.arrivalTime || 0));
+
+        // 탭 카운트 표시
+        const activeCount = document.getElementById('activeCount');
+        const historyCount = document.getElementById('historyCount');
+        if (activeCount) activeCount.textContent = activeList.length ? `(${activeList.length})` : '';
+        if (historyCount) historyCount.textContent = historyList.length ? `(${historyList.length})` : '';
+
+        const list = _scheduleTab === 'active' ? activeList : historyList;
         const el = document.getElementById('scheduledList');
 
         if (list.length === 0) {
-            el.innerHTML = '<div style="color:#666;text-align:center;padding:20px;">예약 없음</div>';
+            const msg = _scheduleTab === 'active' ? '진행 중인 예약 없음' : '기록 없음';
+            el.innerHTML = `<div style="color:#666;text-align:center;padding:20px;">${msg}</div>`;
             return;
         }
 
@@ -1101,6 +1769,28 @@ async function pollBuildStatus() {
     if (!s || s.stopped === false || s.running !== undefined) {
         setTimeout(pollBuildStatus, 5000);
     }
+}
+
+async function togglePause() {
+    const s = await api('GET', '/state').catch(() => null);
+    const isPaused = !!s?.userPaused;
+    const next = isPaused ? 'resume' : 'pause';
+    const msg = isPaused ? '재개하시겠습니까? 모든 큐가 자동 복원됩니다.' : '일시정지하시겠습니까? 모든 큐가 정지되며, 직접 재개해야 다시 동작합니다.';
+    if (!confirm(msg)) return;
+    try {
+        const r = await api('POST', '/' + next);
+        if (r.success) {
+            updatePauseBtn(r.userPaused);
+            await syncQueueStates();
+        }
+    } catch (e) { alert('실패: ' + e.message); }
+}
+
+function updatePauseBtn(paused) {
+    const btn = document.getElementById('pauseBtn');
+    if (!btn) return;
+    btn.textContent = paused ? '▶ 재개' : '⏸ 일시정지';
+    btn.style.background = paused ? '#27ae60' : '#d4900f';
 }
 
 async function changeServer() {

@@ -75,8 +75,25 @@ let state = {
     botLock: new BotLock(),
     botProtection: null,    // { detected: true, type: '...', at: timestamp }
     iframeSessions: new Map(), // sessionId → { url, parentSessionId } — Target.attachedToTarget로 추적
+    userPaused: false, // true면 모든 큐 정지 + 자동 복원/재시작 안 함 (사용자가 명시적으로 재개해야 함)
+    startedAt: Date.now(), // 서버 시작 시각 — 클라이언트가 재시작 감지하는 데 사용
     error: null,
 };
+
+// 모든 큐를 일시정지 (persist는 유지 — 재개 시 복원 위해)
+function pauseAllQueues() {
+    state.scavQueue?.stop();
+    state.marketQueue?.stop();
+    state.farmQueue?.stop();
+    state.buildQueue?.stop();
+    state.trainerQueue?.stop();
+    state.reportCollector?.stop();
+    state.scavQueue = null;
+    state.marketQueue = null;
+    state.farmQueue = null;
+    state.buildQueue = null;
+    state.trainerQueue = null;
+}
 
 // 유저스크립트 자동 주입 비활성화 — hCaptcha 점수 시스템이 영구 setInterval/전역변수 감지
 // 대신 캡차 감지될 때만 attemptAutoSolveCaptcha에서 진짜 OS 마우스 이벤트로 처리
@@ -346,17 +363,25 @@ async function clickCheckboxIn(sessionId) {
 // fake JS .click() 대신 베지어 이동 + mousePressed/Released — hCaptcha 점수 회피
 const mouse = require('./lib/mouse');
 
-// 요소의 viewport 사각형 가져오기 (메인 페이지 셀렉터)
+// 요소의 viewport 사각형 가져오기 — scrollIntoView 후 좌표 (place.js의 검증된 패턴)
+// 좌표가 viewport 밖이면 마우스 이벤트가 다른 곳으로 가거나 무시되는 버그 방지
 async function getElementRect(sessionId, selector) {
     const expr = `
         (() => {
             const el = ${selector};
             if (!el || el.offsetParent === null) return null;
+            el.scrollIntoView({ block: 'center', behavior: 'instant' });
             const r = el.getBoundingClientRect();
             return { x: r.x, y: r.y, w: r.width, h: r.height };
         })()
     `;
-    return await evaluate(state.cdp, sessionId, expr).catch(() => null);
+    const rect = await evaluate(state.cdp, sessionId, expr).catch(() => null);
+    if (rect) {
+        // scrollIntoView 후 좌표가 viewport 안에 있는지 검증
+        const inView = rect.x >= 0 && rect.y >= 0 && rect.w > 0 && rect.h > 0;
+        if (!inView) return null;
+    }
+    return rect;
 }
 
 // 사각형 안 랜덤 좌표 (정중앙 회피)
@@ -400,20 +425,41 @@ async function attemptAutoSolveCaptcha() {
                     return;
                 }
             }
-            // (b) "Begin bot protection check" 버튼
+            // (b) "Begin bot protection check" 버튼 — 클릭 후 페이지 변화 검증
+            // done.button을 검증 후에만 set (실패 시 다음 tick에서 재시도)
             if (!done.button) {
-                const rect = await getElementRect(targetSession, `
+                const buttonSelector = `
                     [...document.querySelectorAll('a.btn.btn-default, .btn.btn-default, button[type="submit"], input[type="submit"]')]
                         .find(b => b.offsetParent !== null && (
                             (b.textContent||'').includes('Begin bot protection check') ||
                             (b.textContent||'').includes('봇 보호') ||
                             (b.value||'').includes('확인')
                         ))
-                `);
+                `;
+                const rect = await getElementRect(targetSession, buttonSelector);
                 if (rect) {
-                    log.info(`[캡차] Begin 버튼 발견 — 진짜 마우스 클릭`);
+                    log.info(`[캡차] Begin 버튼 (${Math.round(rect.x)},${Math.round(rect.y)}) 클릭 시도`);
                     await realClickElement(targetSession, rect);
-                    done.button = true;
+                    // JS .click() 백업 (마우스 이벤트가 무시됐을 경우 보강)
+                    await sleep(500);
+                    await evaluate(state.cdp, targetSession, `
+                        (() => { const el = ${buttonSelector}; if (el) el.click(); })()
+                    `).catch(() => {});
+                    // 페이지 변화 검증: iframe[hcaptcha] 나타나거나 Begin 텍스트가 사라짐
+                    await sleep(2000);
+                    const changed = await evaluate(state.cdp, targetSession, `
+                        (() => {
+                            const hasIframe = !!document.querySelector('iframe[src*="hcaptcha.com"]');
+                            const beginGone = !document.body?.innerText?.includes('Begin bot protection check');
+                            return { hasIframe, beginGone };
+                        })()
+                    `).catch(() => ({ hasIframe: false, beginGone: false }));
+                    if (changed.hasIframe || changed.beginGone) {
+                        log.ok(`[캡차] Begin 클릭 성공 (iframe:${changed.hasIframe}, beginGone:${changed.beginGone})`);
+                        done.button = true;
+                    } else {
+                        log.warn(`[캡차] Begin 클릭이 페이지 변화 없음 — 다음 tick에서 재시도`);
+                    }
                     elapsed += interval;
                     if (elapsed < maxElapsed) setTimeout(tick, interval + Math.floor(Math.random() * 1000));
                     return;
@@ -475,6 +521,16 @@ async function restoreQueues() {
     if (!state.server) return;
     const saved = persist.load(state.server);
     if (!saved || Object.keys(saved).length === 0) return;
+
+    // 사용자가 일시정지 상태면 큐 자동 복원 안 함 — 명시적 재개해야 동작
+    if (saved.paused === true) {
+        state.userPaused = true;
+        log.info('[복원] 사용자 일시정지 상태 — 큐 자동 시작 안 함 (UI에서 재개 필요)');
+        // buildPriorities는 복원 (메모리에 들고 있어야 재개 시 사용)
+        if (saved.buildPriorities) state.buildPriorities = saved.buildPriorities;
+        return;
+    }
+
     const baseUrl = `https://${state.server}.tribalwars.net`;
     const validIds = new Set(state.villages.map(v => v.id));
 
@@ -558,8 +614,45 @@ async function restoreQueues() {
     }
 }
 
+// 저장된 자격증명으로 자동 재로그인 → 서버 재진입
+// 쿠키 만료된 경우에도 무인 복구 가능
+async function attemptAutoRelogin() {
+    const creds = persist.loadCredentials();
+    if (!creds || !creds.username || !creds.password) {
+        log.warn('[자동로그인] 저장된 자격증명 없음 — 사용자 첫 로그인 후 가능');
+        return false;
+    }
+    try {
+        log.info(`[자동로그인] 저장된 ID로 재로그인 시도: ${creds.username}`);
+        const result = await loginAndDetectServers(state.cdp, state.sessionId, creds.username, creds.password);
+        if (!result.success) {
+            log.warn(`[자동로그인] 로그인 실패: ${result.error}`);
+            return false;
+        }
+        log.ok(`[자동로그인] 로그인 성공 — 서버 ${result.servers.length}개 감지`);
+        // 원래 서버로 재진입 (page/play URL navigate)
+        if (state.server && state.botSessionId) {
+            const playUrl = `https://www.tribalwars.net/en-dk/page/play/${state.server}`;
+            await navigate(state.cdp, state.botSessionId, playUrl);
+            await waitForLoad(state.cdp, state.botSessionId, 15000);
+            await sleep(2000);
+            const url = await evaluate(state.cdp, state.botSessionId, 'location.href');
+            if (url && url.includes(`${state.server}.tribalwars.net/game.php`)) {
+                log.ok(`[자동로그인] 봇 탭 게임 진입 성공`);
+                return true;
+            }
+            log.warn(`[자동로그인] 봇 탭 게임 진입 실패 — URL: ${url}`);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        log.warn(`[자동로그인] 예외: ${e.message}`);
+        return false;
+    }
+}
+
 // 세션 만료 자동 복구 — 봇/유저 탭을 게임 URL로 navigate
-// 쿠키가 살아있으면 자동 재로그인, 만료됐으면 로그인 페이지로 이동 (사용자 알림)
+// 쿠키가 살아있으면 자동 재로그인, 만료됐으면 저장된 자격증명으로 자동 로그인
 async function handleSessionExpired() {
     if (!state.cdp || !state.server) {
         log.warn('[세션복구] cdp/server 없음 — 스킵');
@@ -577,10 +670,14 @@ async function handleSessionExpired() {
             if (url && url.includes('game.php')) {
                 log.ok(`[세션복구] 봇 탭 재진입 성공: ${url.slice(0, 80)}`);
             } else {
-                log.warn(`[세션복구] 봇 탭 재진입 실패 — 현재 URL: ${url}`);
-                log.warn('[세션복구] 쿠키 만료된 듯. 사용자 수동 로그인 필요');
-                state.error = '세션 만료 — 수동 로그인 필요';
-                return;
+                // 쿠키도 만료 → 저장된 자격증명으로 자동 재로그인 시도
+                log.warn(`[세션복구] 쿠키 만료 — 자동 재로그인 시도`);
+                const ok = await attemptAutoRelogin();
+                if (!ok) {
+                    state.error = '세션 만료 — 자동 로그인 실패 (자격증명 없거나 비밀번호 변경?)';
+                    log.err('[세션복구] 자동 로그인 실패 — 수동 로그인 필요');
+                    return;
+                }
             }
         } catch (e) {
             log.warn(`[세션복구] 봇 탭 navigate 실패: ${e.message}`);
@@ -607,6 +704,11 @@ function clearBotProtection() {
     state.botProtection = null;
     if (botCheckPollTimer) { clearInterval(botCheckPollTimer); botCheckPollTimer = null; }
     log.ok(`봇 프로텍션 해제 (${seconds}초 만에 해결)`);
+    // 사용자 일시정지 상태면 자동 재시작 안 함
+    if (state.userPaused) {
+        log.info('[복구] 사용자 일시정지 상태 — 큐 자동 재시작 안 함');
+        return;
+    }
     // 정지됐던 큐들 자동 재시작 (persist에 저장된 설정으로 복원)
     if (state.phase === 'ready' && state.server) {
         log.info('[복구] 큐 자동 재시작...');
@@ -663,6 +765,8 @@ async function launch(username, password) {
 
         state.servers = result.servers;
         state.phase = 'select_server';
+        // 로그인 성공 시 자격증명 저장 (세션 만료 시 자동 재로그인용)
+        try { persist.saveCredentials(username, password); } catch {}
         return { success: true, phase: 'select_server', servers: result.servers };
 
     } catch (e) {
@@ -820,20 +924,94 @@ function startServer() {
 
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        // 모든 응답에 서버 시작 시각 포함 — 클라이언트가 재시작 감지
+        res.setHeader('X-Server-Started-At', String(state.startedAt));
+        // 정적 파일/JSON 모두 캐시 무효화 (개발 중 코드 변경 즉시 반영)
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
         // ---- 셋업/런치 API ----
 
-        // GET /api/state — 현재 상태
+        // GET /api/state — 현재 상태 (모든 응답에 startedAt 포함 — 클라이언트가 서버 재시작 감지)
         if (pathname === '/api/state' && req.method === 'GET') {
             json(res, {
                 phase: state.phase,
                 server: state.server,
                 servers: state.servers,
                 villageCount: state.villages.length,
+                userPaused: state.userPaused,
+                startedAt: state.startedAt,
                 error: state.error,
             });
+            return;
+        }
+
+        // POST /api/pause — 모든 큐 일시정지 (persist 유지, 재개 시 복원)
+        if (pathname === '/api/pause' && req.method === 'POST') {
+            state.userPaused = true;
+            pauseAllQueues();
+            persist.setKey(state.server, 'paused', true);
+            log.info('[일시정지] 사용자 요청으로 모든 큐 정지');
+            json(res, { success: true, userPaused: true });
+            return;
+        }
+
+        // POST /api/resume — 일시정지 해제 + 세션 검증 + 큐 자동 복원
+        if (pathname === '/api/resume' && req.method === 'POST') {
+            state.userPaused = false;
+            persist.setKey(state.server, 'paused', false);
+            log.info('[재개] 세션 검증 시작...');
+
+            // 1. 봇 탭이 게임 페이지에 있는지 확인 — 다른 곳에서 로그인했으면 세션 만료됐을 수 있음
+            let sessionOk = false;
+            try {
+                if (state.botSessionId && state.cdp) {
+                    const url = await evaluate(state.cdp, state.botSessionId, 'location.href').catch(() => '');
+                    if (url && url.includes(`${state.server}.tribalwars.net/game.php`)) {
+                        sessionOk = true;
+                    } else {
+                        // 만료된 듯 → 재진입 시도
+                        log.info(`[재개] 봇 탭 URL: ${(url||'').slice(0,80)} — 세션 재진입 시도`);
+                        const playUrl = `https://www.tribalwars.net/en-dk/page/play/${state.server}`;
+                        await navigate(state.cdp, state.botSessionId, playUrl);
+                        await waitForLoad(state.cdp, state.botSessionId, 15000);
+                        await sleep(2000);
+                        const url2 = await evaluate(state.cdp, state.botSessionId, 'location.href').catch(() => '');
+                        if (url2 && url2.includes('game.php')) {
+                            sessionOk = true;
+                            log.ok(`[재개] 세션 재진입 성공`);
+                        } else {
+                            // 쿠키 만료 → 저장된 자격증명으로 자동 재로그인 시도
+                            log.warn(`[재개] 쿠키 만료 — 자동 재로그인 시도`);
+                            const ok = await attemptAutoRelogin();
+                            if (ok) {
+                                sessionOk = true;
+                                log.ok('[재개] 자동 재로그인 + 게임 재진입 성공');
+                            } else {
+                                state.error = '자동 로그인 실패 — 자격증명 확인 필요';
+                                json(res, { success: false, error: '자동 로그인 실패. 자격증명이 잘못되었거나 비밀번호가 변경되었을 수 있습니다.', sessionExpired: true });
+                                return;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                log.warn(`[재개] 세션 검증 에러: ${e.message}`);
+            }
+
+            // 2. 큐 자동 복원
+            log.info('[재개] 큐 자동 복원...');
+            try {
+                await restoreQueues();
+                if (state.server && state.botSessionId) {
+                    const baseUrl = `https://${state.server}.tribalwars.net`;
+                    startReportCollector(state.server, baseUrl);
+                }
+            } catch (e) { log.warn(`[재개] 복원 실패: ${e.message}`); }
+            json(res, { success: true, userPaused: false, sessionOk });
             return;
         }
 
@@ -888,12 +1066,282 @@ function startServer() {
             return;
         }
 
-        // POST /api/schedule
+        // POST /api/schedule — body: 일반 schedule 데이터 + 선택적 templateId
+        // templateId 있으면 템플릿 병력 사용 + 마을 보유량으로 clamp
         if (pathname === '/api/schedule' && req.method === 'POST') {
             if (!state.scheduler) { json(res, { success: false, error: '스케줄러 없음' }); return; }
             const body = JSON.parse(await readBody(req));
+
+            // 템플릿 적용
+            if (body.templateId) {
+                const templates = persist.loadTemplates(state.server);
+                const tpl = templates.find(t => t.id === body.templateId);
+                if (!tpl) { json(res, { success: false, error: '템플릿 없음' }); return; }
+                // 템플릿 병력 사용
+                body.troops = { ...tpl.troops };
+            }
+
+            // 마을 보유 병력으로 clamp (넘치면 가능한 만큼만)
+            if (body.troops && body.sourceVillageId) {
+                try {
+                    const available = await getTroopsForVillage(body.sourceVillageId);
+                    const clamped = {};
+                    let didClamp = false;
+                    for (const [unit, count] of Object.entries(body.troops)) {
+                        const have = available[unit] || 0;
+                        const use = Math.min(count, have);
+                        if (use < count) didClamp = true;
+                        clamped[unit] = use;
+                    }
+                    body.troops = clamped;
+                    body._clamped = didClamp;
+                    body._availableSnapshot = available;
+                } catch (e) {
+                    log.warn(`[예약] clamp 실패 (마을 ${body.sourceVillageId}): ${e.message}`);
+                }
+            }
+
             const atk = state.scheduler.schedule(body);
-            json(res, { success: true, id: atk.id });
+            json(res, { success: true, id: atk.id, clamped: body._clamped, troops: body.troops });
+            return;
+        }
+
+        // POST /api/villages/refresh — 마을 목록 재감지 (수동 새로고침)
+        if (pathname === '/api/villages/refresh' && req.method === 'POST') {
+            if (!state.cdp || !state.botSessionId || !state.server) {
+                json(res, { success: false, error: '서버 연결 안 됨' }); return;
+            }
+            try {
+                const baseUrl = `https://${state.server}.tribalwars.net`;
+                state.villages = await detectVillages(state.cdp, state.botSessionId, baseUrl);
+                json(res, { success: true, villages: state.villages });
+            } catch (e) {
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // POST /api/train/immediate — 즉시 트레인 (지금 바로 발사)
+        // body: { sourceVillageIds:[], targets:[{x,y}], templateIds:[], type? }
+        // 동작: place 페이지 이동 → 폼 입력 → 진짜 마우스 클릭 → confirm 클릭 → 다음
+        // 캡처 검증된 place.js의 gotoPlace/fillForm/clickAttack/clickConfirm 그대로 사용
+        if (pathname === '/api/train/immediate' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req));
+            const { sourceVillageIds = [], targets = [], waves = [], type = 'attack' } = body;
+            if (!sourceVillageIds.length || !targets.length || !waves.length) {
+                json(res, { success: false, error: '마을/타겟/웨이브 모두 필요' }); return;
+            }
+            // waves: [{name, troops}, ...] — 각 웨이브가 직접 troops 들고있음
+            // 마을별 보유 병력 (웨이브 사이 차감 추적)
+            const villageBudget = {};
+            for (const sid of sourceVillageIds) {
+                try { villageBudget[sid] = await getTroopsForVillage(sid); }
+                catch { villageBudget[sid] = {}; }
+            }
+            // 응답을 빨리 보내고 백그라운드에서 발사 (사용자 화면 안 멈춤)
+            json(res, { success: true, message: '백그라운드에서 발사 시작', count: sourceVillageIds.length * targets.length * waves.length });
+            // 실제 발사 — 비동기
+            (async () => {
+                const baseUrl = `https://${state.server}.tribalwars.net`;
+                let fireSent = 0, fireSkipped = 0, fireFailed = 0;
+                const lastMouse = { x: 500, y: 300 };
+                for (const sid of sourceVillageIds) {
+                    const sv = state.villages.find(v => v.id === sid);
+                    if (!sv) continue;
+                    for (const t of targets) {
+                        for (let w = 0; w < waves.length; w++) {
+                            const tpl = waves[w];
+                            const budget = villageBudget[sid] || {};
+                            const troops = {};
+                            let total = 0;
+                            for (const [u, n] of Object.entries(tpl.troops)) {
+                                const have = budget[u] || 0;
+                                const use = Math.min(n, have);
+                                if (use > 0) { troops[u] = use; budget[u] = have - use; total += use; }
+                            }
+                            if (total === 0) { fireSkipped++; continue; }
+                            try {
+                                const { gotoPlace, fillForm, clickAttack, clickSupport, waitForConfirm } = require('./lib/place');
+                                const { click: mouseClick } = require('./lib/mouse');
+                                await gotoPlace(state.cdp, state.botSessionId, baseUrl, sid);
+                                await fillForm(state.cdp, state.botSessionId, t.x, t.y, troops);
+                                await sleep(randInt(400, 900));
+                                if (type === 'support') {
+                                    await clickSupport(state.cdp, state.botSessionId, lastMouse);
+                                } else {
+                                    await clickAttack(state.cdp, state.botSessionId, lastMouse);
+                                }
+                                // confirm 화면 대기 → 발사
+                                const confirmBtn = await waitForConfirm(state.cdp, state.botSessionId);
+                                await sleep(randInt(200, 600));
+                                if (confirmBtn) {
+                                    await mouseClick(state.cdp, state.botSessionId, confirmBtn.x + confirmBtn.w/2, confirmBtn.y + confirmBtn.h/2);
+                                }
+                                fireSent++;
+                                log.ok(`[트레인즉시] ${sv.name}→(${t.x}|${t.y}) [W${w+1}:${tpl.name}] 발사`);
+                                await sleep(randInt(800, 1800));
+                            } catch (e) {
+                                fireFailed++;
+                                log.warn(`[트레인즉시] ${sv.name}→(${t.x}|${t.y}) 실패: ${e.message}`);
+                            }
+                        }
+                    }
+                }
+                log.info(`[트레인즉시] 완료 — 발사 ${fireSent}, 스킵 ${fireSkipped}, 실패 ${fireFailed}`);
+            })().catch(e => log.err('[트레인즉시] 백그라운드 에러: ' + e.message));
+            return;
+        }
+
+        // POST /api/schedule/train — 트레인 (다중 웨이브)
+        // body: { sourceVillageIds:[], targets:[{x,y}], templateIds:[] (웨이브 N개), arrivalStart:ISO, arrivalEnd:ISO, type?:'attack'|'support' }
+        // 동작: (source × target × template) 각 조합 = 1개 공격 = 1개 웨이브
+        //       각 마을의 보유 병력은 웨이브 사이에 차감 추적 (같은 마을이 4웨이브면 병력이 분배됨)
+        // 캡처 검증: scheduler.schedule()이 confirm 페이지 Duration으로 fire 계산함 (검증된 흐름)
+        if (pathname === '/api/schedule/train' && req.method === 'POST') {
+            if (!state.scheduler) { json(res, { success: false, error: '스케줄러 없음' }); return; }
+            const body = JSON.parse(await readBody(req));
+            const { sourceVillageIds = [], targets = [], waves = [], arrivalStart, arrivalEnd, type = 'attack' } = body;
+
+            if (!sourceVillageIds.length) { json(res, { success: false, error: '출발 마을 필요' }); return; }
+            if (!targets.length) { json(res, { success: false, error: '타겟 좌표 필요' }); return; }
+            if (!waves.length) { json(res, { success: false, error: '웨이브 1개 이상 필요' }); return; }
+            const startMs = new Date(arrivalStart).getTime();
+            const endMs = new Date(arrivalEnd).getTime();
+            if (!startMs || !endMs || endMs <= startMs) {
+                json(res, { success: false, error: '시간창 잘못됨' }); return;
+            }
+            // waves: [{name, troops}, ...] — 각 웨이브가 직접 troops 들고있음
+
+            // 마을별 현재 보유 병력 미리 fetch — 웨이브 사이에 차감 추적
+            const villageBudget = {}; // villageId → { spear:N, ... }
+            for (const sid of sourceVillageIds) {
+                try { villageBudget[sid] = await getTroopsForVillage(sid); }
+                catch { villageBudget[sid] = {}; }
+            }
+
+            // 모든 (source × target × wave) 조합
+            const jobs = [];
+            for (const sid of sourceVillageIds) {
+                const sv = state.villages.find(v => v.id === sid);
+                if (!sv) continue;
+                for (const t of targets) {
+                    for (let waveIdx = 0; waveIdx < waves.length; waveIdx++) {
+                        jobs.push({ sourceVillage: sv, target: t, template: waves[waveIdx], waveIdx });
+                    }
+                }
+            }
+            if (!jobs.length) { json(res, { success: false, error: '유효한 조합 없음' }); return; }
+
+            // 모드 분기:
+            //  - 'window' (기본): 시간창 안에 분산 + 순서 셔플 (일반 트레인)
+            //  - 'sequence' (노블 트레인): startMs부터 spacingMs 간격으로 순서 유지
+            const mode = body.distMode || 'window';
+            const spacingMs = parseInt(body.spacingMs) || 250; // 노블 트레인 기본 250ms
+            const N = jobs.length;
+
+            // jobs 정렬 — sequence 모드는 source > target > wave 순으로 안정 정렬 (셔플 X)
+            const ordered = mode === 'sequence'
+                ? [...jobs] // 입력 순서 유지 (waveIdx 순)
+                : [...jobs].sort(() => Math.random() - 0.5); // 셔플
+
+            const scheduled = [];
+            for (let i = 0; i < N; i++) {
+                const job = ordered[i];
+                let arrivalMs;
+                if (mode === 'sequence') {
+                    // 정확한 간격 + 작은 지터 (±10ms 자연스러움)
+                    const jitter = (Math.random() - 0.5) * 20;
+                    arrivalMs = startMs + i * spacingMs + jitter;
+                } else {
+                    // window 모드: 슬롯 균등 분배 + 슬롯 내 랜덤
+                    const slot = (endMs - startMs) / N;
+                    const slotStart = startMs + slot * i;
+                    const margin = slot * 0.1;
+                    arrivalMs = slotStart + margin + Math.random() * (slot - 2 * margin);
+                }
+
+                // 해당 마을 잔여 병력에서 템플릿 clamp + 차감
+                const budget = villageBudget[job.sourceVillage.id] || {};
+                const troops = {};
+                let total = 0;
+                for (const [u, n] of Object.entries(job.template.troops)) {
+                    const have = budget[u] || 0;
+                    const use = Math.min(n, have);
+                    if (use > 0) {
+                        troops[u] = use;
+                        budget[u] = have - use; // 차감 (다음 웨이브가 못 쓰게)
+                        total += use;
+                    }
+                }
+
+                if (total === 0) {
+                    scheduled.push({
+                        source: job.sourceVillage.id,
+                        target: job.target,
+                        wave: job.waveIdx,
+                        template: job.template.name,
+                        skipped: '병력 없음 (이전 웨이브에서 소진)',
+                    });
+                    continue;
+                }
+
+                const atk = state.scheduler.schedule({
+                    type,
+                    sourceVillageId: job.sourceVillage.id,
+                    sourceX: job.sourceVillage.x,
+                    sourceY: job.sourceVillage.y,
+                    sourceName: `${job.sourceVillage.name} [W${job.waveIdx + 1}/${waves.length}:${job.template.name}]`,
+                    targetX: job.target.x,
+                    targetY: job.target.y,
+                    troops,
+                    arrivalTime: Math.round(arrivalMs),
+                });
+                scheduled.push({
+                    id: atk.id,
+                    source: job.sourceVillage.id,
+                    target: job.target,
+                    wave: job.waveIdx,
+                    template: job.template.name,
+                    arrivalAt: new Date(arrivalMs).toISOString(),
+                });
+            }
+
+            const okCount = scheduled.filter(s => s.id).length;
+            const skipCount = scheduled.filter(s => s.skipped).length;
+            log.info(`[트레인] ${okCount}개 예약 (스킵 ${skipCount}개, 시간창 ${Math.round((endMs-startMs)/1000)}초, 웨이브 ${waves.length})`);
+            json(res, { success: true, scheduled });
+            return;
+        }
+
+        // GET /api/templates — 템플릿 목록
+        if (pathname === '/api/templates' && req.method === 'GET') {
+            json(res, { templates: persist.loadTemplates(state.server) });
+            return;
+        }
+        // POST /api/templates — 템플릿 생성/수정 (body: {id?, name, troops})
+        if (pathname === '/api/templates' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req));
+            if (!body.name || !body.troops) { json(res, { success: false, error: 'name + troops 필요' }); return; }
+            const templates = persist.loadTemplates(state.server);
+            if (body.id) {
+                const idx = templates.findIndex(t => t.id === body.id);
+                if (idx >= 0) templates[idx] = { ...templates[idx], name: body.name, troops: body.troops };
+                else templates.push({ id: body.id, name: body.name, troops: body.troops });
+            } else {
+                const newId = Date.now().toString(36);
+                templates.push({ id: newId, name: body.name, troops: body.troops });
+                body.id = newId;
+            }
+            persist.saveTemplates(state.server, templates);
+            json(res, { success: true, id: body.id });
+            return;
+        }
+        // DELETE /api/templates/:id
+        if (pathname.match(/^\/api\/templates\/[^/]+$/) && req.method === 'DELETE') {
+            const id = pathname.split('/').pop();
+            const templates = persist.loadTemplates(state.server).filter(t => t.id !== id);
+            persist.saveTemplates(state.server, templates);
+            json(res, { success: true });
             return;
         }
 
@@ -1272,9 +1720,39 @@ function startServer() {
         } catch { res.writeHead(404); res.end('Not Found'); }
     });
 
-    server.listen(args.port, () => {
-        log.ok(`웹 서버 시작: http://localhost:${args.port}`);
+    // 0.0.0.0 바인딩 — 외부 네트워크에서 접근 가능 (포트포워딩용)
+    server.listen(args.port, '0.0.0.0', () => {
+        log.ok(`웹 서버 시작: http://localhost:${args.port} (모든 네트워크 인터페이스)`);
+        // 접근 가능한 로컬 IP 표시
+        try {
+            const os = require('os');
+            const ifaces = os.networkInterfaces();
+            const ips = [];
+            for (const name of Object.keys(ifaces)) {
+                for (const ni of ifaces[name]) {
+                    if (ni.family === 'IPv4' && !ni.internal) ips.push(ni.address);
+                }
+            }
+            if (ips.length) {
+                log.ok(`  로컬 네트워크: ${ips.map(ip => `http://${ip}:${args.port}`).join(', ')}`);
+                log.info(`  외부 접속: 공유기에서 ${args.port} 포트포워딩 → 위 PC IP로 설정 후 공인IP:${args.port}`);
+            }
+        } catch {}
     });
+}
+
+// 간단한 인증 미들웨어 — 환경변수 BUJOK_TOKEN 설정 시 활성화
+// 사용법: 헤더 'X-Auth-Token: <토큰>' 또는 쿠키 'bujok_token=<토큰>' 또는 쿼리 ?token=<토큰>
+function checkAuth(req) {
+    const required = process.env.BUJOK_TOKEN;
+    if (!required) return true; // 토큰 미설정 시 인증 안 함
+    const headerToken = req.headers['x-auth-token'];
+    if (headerToken === required) return true;
+    const cookieMatch = (req.headers.cookie || '').match(/bujok_token=([^;]+)/);
+    if (cookieMatch && cookieMatch[1] === required) return true;
+    const url = new URL(req.url, 'http://x');
+    if (url.searchParams.get('token') === required) return true;
+    return false;
 }
 
 function json(res, data, status = 200) {

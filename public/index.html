@@ -407,21 +407,40 @@ label { min-width: 70px; }
 <h2>자동 양성 (병력)</h2>
 <div class="panel">
     <p style="font-size:12px;color:#888;margin-top:0;">
-        각 건물별 양성할 병종/개수 설정. 큐 비고 자원 충분하면 자동 발주, 부족하면 다음 사이클 재시도.
+        건물당 양성 병종 1개씩 선택. 우선순위: 🥇 마구간 → 🥈 막사 → 🥉 대장간.
+        자원 충분하면 매 사이클 1마리씩 자동 발주, 부족하면 다음 사이클 재시도.
     </p>
 
-    <div class="card-section-title">막사 (Barracks)</div>
-    <div class="troops-grid" id="trainBarracksGrid"></div>
-
-    <div class="card-section-title">마구간 (Stable)</div>
-    <div class="troops-grid" id="trainStableGrid"></div>
-
-    <div class="card-section-title">대장간 (Workshop)</div>
-    <div class="troops-grid" id="trainGarageGrid"></div>
+    <div class="row">
+        <label>🥇 마구간</label>
+        <select id="trainSel_stable" style="flex:1;max-width:200px;">
+            <option value="">— 사용 안 함 —</option>
+            <option value="spy">정찰 (Scout)</option>
+            <option value="light">경기병 (Light cavalry)</option>
+            <option value="marcher">기마궁수 (Mounted archer)</option>
+            <option value="heavy">중기병 (Heavy cavalry)</option>
+        </select>
+    </div>
+    <div class="row">
+        <label>🥈 막사</label>
+        <select id="trainSel_barracks" style="flex:1;max-width:200px;">
+            <option value="">— 사용 안 함 —</option>
+            <option value="spear">창병 (Spear fighter)</option>
+            <option value="sword">검사 (Swordsman)</option>
+            <option value="axe">도끼병 (Axeman)</option>
+            <option value="archer">궁수 (Archer)</option>
+        </select>
+    </div>
+    <div class="row">
+        <label>🥉 대장간</label>
+        <select id="trainSel_garage" style="flex:1;max-width:200px;">
+            <option value="">— 사용 안 함 —</option>
+            <option value="ram">파성추 (Ram)</option>
+            <option value="catapult">투석기 (Catapult)</option>
+        </select>
+    </div>
 
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:15px;">
-        <button class="btn btn-small" onclick="loadTrainerDefault()">기본값 (창1+경기1)</button>
-        <button class="btn btn-small" onclick="loadTrainerNobles()">노블+공성</button>
         <button class="btn btn-primary btn-small" onclick="startTrainer()">▶ 자동 양성 시작</button>
         <button class="btn btn-danger btn-small" onclick="stopTrainer()">■ 정지</button>
         <span id="trainerStatus" style="font-size:12px;color:#888;"></span>
@@ -761,7 +780,6 @@ async function loadVillages() {
         renderMktVillages();
         renderFarmVillages();
         renderTrainSourceCheckboxes();
-        renderTrainerGrids();
         await syncTrainerPlan();
         await loadBuildPriorityFromServer();
         renderBuildVillageSelect();
@@ -1732,75 +1750,42 @@ async function stopAutoFarm() {
     document.getElementById('farmStatus').textContent = '자동 동줍 중지됨';
 }
 
-// 건물별 병종 — 캡처 검증된 trainer.js BUILDING_UNITS 동일
-const TRAINER_BUILDINGS = {
-    barracks: ['spear', 'sword', 'axe', 'archer'],
-    stable:   ['spy', 'light', 'marcher', 'heavy'],
-    garage:   ['ram', 'catapult'],
-};
+// 우선순위 고정: 마구간 > 막사 > 대장간
+const TRAINER_PRIORITY = ['stable', 'barracks', 'garage'];
 
-function renderTrainerGrids() {
-    for (const [b, units] of Object.entries(TRAINER_BUILDINGS)) {
-        const gid = b === 'barracks' ? 'trainBarracksGrid' : b === 'stable' ? 'trainStableGrid' : 'trainGarageGrid';
-        const grid = document.getElementById(gid);
-        if (!grid) continue;
-        grid.innerHTML = units.map(u => `
-            <div class="troop-item">
-                <label>${UNIT_NAMES[u] || u}</label>
-                <input type="number" id="trainCount_${b}_${u}" value="0" min="0" max="999">
-            </div>`).join('');
-    }
-}
-
+// 건물당 1병종 선택 → plan 생성 (우선순위 순)
 function getTrainerPlan() {
     const plan = [];
-    for (const [b, units] of Object.entries(TRAINER_BUILDINGS)) {
-        for (const u of units) {
-            const inp = document.getElementById('trainCount_' + b + '_' + u);
-            const v = parseInt(inp?.value || '0');
-            if (v > 0) plan.push({ building: b, unit: u, count: v });
-        }
+    for (const b of TRAINER_PRIORITY) {
+        const sel = document.getElementById('trainSel_' + b);
+        const u = sel?.value || '';
+        if (u) plan.push({ building: b, unit: u, count: 1 });  // 매 사이클 1마리씩
     }
     return plan;
 }
 
 function setTrainerPlan(plan) {
-    // 모두 0으로 초기화
-    for (const [b, units] of Object.entries(TRAINER_BUILDINGS)) {
-        for (const u of units) {
-            const inp = document.getElementById('trainCount_' + b + '_' + u);
-            if (inp) inp.value = 0;
-        }
+    // 모두 비우기
+    for (const b of TRAINER_PRIORITY) {
+        const sel = document.getElementById('trainSel_' + b);
+        if (sel) sel.value = '';
     }
-    // plan 적용
+    // plan 적용 (각 건물 첫 항목만 — 1병종/건물)
+    const seen = new Set();
     for (const item of plan || []) {
-        const inp = document.getElementById('trainCount_' + item.building + '_' + item.unit);
-        if (inp) inp.value = item.count;
+        if (seen.has(item.building)) continue;
+        seen.add(item.building);
+        const sel = document.getElementById('trainSel_' + item.building);
+        if (sel) sel.value = item.unit;
     }
-}
-
-function loadTrainerDefault() {
-    setTrainerPlan([
-        { building: 'stable', unit: 'light', count: 1 },
-        { building: 'barracks', unit: 'spear', count: 1 },
-    ]);
-}
-
-function loadTrainerNobles() {
-    setTrainerPlan([
-        { building: 'stable', unit: 'light', count: 1 },
-        { building: 'barracks', unit: 'axe', count: 5 },
-        { building: 'garage', unit: 'ram', count: 1 },
-        { building: 'garage', unit: 'catapult', count: 1 },
-    ]);
 }
 
 async function startTrainer() {
     const plan = getTrainerPlan();
-    if (plan.length === 0) { alert('병종/개수 1개 이상 설정 필요'); return; }
+    if (plan.length === 0) { alert('최소 1개 건물 병종 선택 필요'); return; }
     const data = await api('POST', '/trainer/start', { plan });
     document.getElementById('trainerStatus').textContent = data.success
-        ? `실행 중 — ${plan.length}개 작업 (${plan.map(p => UNIT_NAMES[p.unit] + p.count).join(', ')})`
+        ? `실행 중 — ${plan.map(p => p.building + ':' + (UNIT_NAMES[p.unit] || p.unit)).join(' → ')}`
         : ('실패: ' + data.error);
 }
 async function stopTrainer() {
@@ -1812,9 +1797,15 @@ async function stopTrainer() {
 async function syncTrainerPlan() {
     try {
         const s = await api('GET', '/trainer/status');
-        if (s && s.plan) setTrainerPlan(s.plan);
-        else loadTrainerDefault();
-    } catch { loadTrainerDefault(); }
+        if (s && s.plan && s.plan.length) setTrainerPlan(s.plan);
+        else {
+            // 기본값
+            const stableSel = document.getElementById('trainSel_stable');
+            const barracksSel = document.getElementById('trainSel_barracks');
+            if (stableSel) stableSel.value = 'light';
+            if (barracksSel) barracksSel.value = 'spear';
+        }
+    } catch {}
 }
 
 // 자동 건설

@@ -757,12 +757,18 @@ async function loadVillages() {
 
 async function onVillageChange() {
     const vid = document.getElementById('sourceVillage').value;
+    if (!vid) { console.warn('[병력동기화] vid 없음'); return; }
+    // 로딩 상태 표시
+    availableTroops = { _loading: 1 };
+    renderVillageTroopsBox();
     try {
         const data = await api('GET', '/villages/' + vid + '/troops');
         availableTroops = data.troops || {};
+        console.log('[병력동기화] vid=' + vid + ', 병력=', availableTroops);
         renderTroops();
         renderVillageTroopsBox();
-    } catch {
+    } catch (e) {
+        console.error('[병력동기화] 실패 vid=' + vid, e);
         availableTroops = {};
         renderTroops();
         renderVillageTroopsBox();
@@ -773,9 +779,13 @@ async function onVillageChange() {
 function renderVillageTroopsBox() {
     const el = document.getElementById('villageTroopsBox');
     if (!el) return;
-    const entries = Object.entries(availableTroops || {}).filter(([,c]) => c > 0);
+    if (availableTroops && availableTroops._loading) {
+        el.innerHTML = '<span style="color:#888;">⟳ 병력 조회 중...</span>';
+        return;
+    }
+    const entries = Object.entries(availableTroops || {}).filter(([k,c]) => k !== '_loading' && c > 0);
     if (entries.length === 0) {
-        el.innerHTML = '<span style="color:#666;">보유 병력 없음</span>';
+        el.innerHTML = '<span style="color:#666;">보유 병력 없음 (또는 조회 실패)</span>';
         return;
     }
     el.innerHTML = '<strong style="color:#aaa;">보유:</strong> ' +

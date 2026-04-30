@@ -1161,22 +1161,21 @@ function startServer() {
                             }
                             if (total === 0) { fireSkipped++; continue; }
                             try {
-                                const { gotoPlace, fillForm, clickAttack, clickSupport, waitForConfirm } = require('./lib/place');
-                                const { click: mouseClick } = require('./lib/mouse');
+                                // 캡처 검증된 place.js 함수만 사용 — scheduler.js와 동일 흐름
+                                const { gotoPlace, fillForm, clickAttack, clickSupport, waitForConfirm, clickConfirmOk } = require('./lib/place');
                                 await gotoPlace(state.cdp, state.botSessionId, baseUrl, sid);
                                 await fillForm(state.cdp, state.botSessionId, t.x, t.y, troops);
                                 await sleep(randInt(400, 900));
+                                let postClickMouse;
                                 if (type === 'support') {
-                                    await clickSupport(state.cdp, state.botSessionId, lastMouse);
+                                    postClickMouse = await clickSupport(state.cdp, state.botSessionId, lastMouse);
                                 } else {
-                                    await clickAttack(state.cdp, state.botSessionId, lastMouse);
+                                    postClickMouse = await clickAttack(state.cdp, state.botSessionId, lastMouse);
                                 }
-                                // confirm 화면 대기 → 발사
+                                // confirm 화면 대기 → clickConfirmOk로 발사 (scheduler.js와 동일)
                                 const confirmBtn = await waitForConfirm(state.cdp, state.botSessionId);
                                 await sleep(randInt(200, 600));
-                                if (confirmBtn) {
-                                    await mouseClick(state.cdp, state.botSessionId, confirmBtn.x + confirmBtn.w/2, confirmBtn.y + confirmBtn.h/2);
-                                }
+                                await clickConfirmOk(state.cdp, state.botSessionId, confirmBtn, postClickMouse || lastMouse);
                                 fireSent++;
                                 log.ok(`[트레인즉시] ${sv.name}→(${t.x}|${t.y}) [W${w+1}:${tpl.name}] 발사`);
                                 await sleep(randInt(800, 1800));

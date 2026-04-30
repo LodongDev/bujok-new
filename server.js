@@ -883,27 +883,30 @@ async function getTroopsForVillage(villageId) {
     if (!state.cdp || state.phase !== 'ready') return {};
     const baseUrl = `https://${state.server}.tribalwars.net`;
     try {
-        // 봇 탭에서 fetch로 병력 조회 (유저 탭 안 건드림)
-        const troops = await evaluate(state.cdp, state.botSessionId, `
+        // 캡처 검증된 endpoint: ajax=home_units → JSON {response: {spear:N, sword:N, ...}}
+        const result = await evaluate(state.cdp, state.botSessionId, `
             (async () => {
                 try {
-                    const res = await fetch('${baseUrl}/game.php?village=${villageId}&screen=place&ajax=units_info', {
+                    const res = await fetch('${baseUrl}/game.php?village=${villageId}&screen=place&ajax=home_units', {
                         headers: { 'TribalWars-Ajax': '1', 'X-Requested-With': 'XMLHttpRequest' },
                     });
-                    const html = await res.text();
-                    // HTML 파싱으로 병력 수 추출
-                    const units = {};
-                    const unitNames = ['spear','sword','axe','archer','spy','light','marcher','heavy','ram','catapult','knight','snob'];
-                    for (const name of unitNames) {
-                        const m = html.match(new RegExp('id="units_entry_all_' + name + '"[^>]*>(\\\\d+)'));
-                        if (m) units[name] = parseInt(m[1]);
-                        else units[name] = 0;
-                    }
-                    return units;
-                } catch (e) { return null; }
+                    const text = await res.text();
+                    if (!text || text.startsWith('<')) return { ok: false, error: 'non-JSON' };
+                    return { ok: true, data: JSON.parse(text) };
+                } catch (e) { return { ok: false, error: e.message }; }
             })()
         `);
-        if (troops) return troops;
+        if (result?.ok && result.data?.response) {
+            // {spear: 69, sword: 15, ...} 형식 그대로 반환
+            const r = result.data.response;
+            return {
+                spear: r.spear || 0, sword: r.sword || 0, axe: r.axe || 0,
+                archer: r.archer || 0, spy: r.spy || 0,
+                light: r.light || 0, marcher: r.marcher || 0, heavy: r.heavy || 0,
+                ram: r.ram || 0, catapult: r.catapult || 0,
+                knight: r.knight || 0, snob: r.snob || 0, militia: r.militia || 0,
+            };
+        }
         // 폴백: 페이지 이동 방식 (봇 탭에서)
         await navigate(state.cdp, state.botSessionId, `${baseUrl}/game.php?village=${villageId}&screen=place`);
         await waitForLoad(state.cdp, state.botSessionId);

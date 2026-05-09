@@ -541,60 +541,163 @@ label { min-width: 70px; }
 <div class="tab-content" id="tabPatchnotes">
 <h2>📝 패치노트</h2>
 <div class="panel" style="line-height:1.7;">
+<div style="font-size:12px;color:#888;margin-bottom:12px;">날짜는 작업 완료일 기준 (커밋 일자)</div>
+
+<!-- ===== 2026-05-09 (오늘 푸시) ===== -->
+<div style="margin-bottom:8px;padding:6px 12px;background:#1a1a2e;border-radius:4px;">
+    <b style="color:#fff;font-size:14px;">📅 2026-05-09</b>
+    <span style="color:#888;font-size:11px;margin-left:8px;">오늘 푸시</span>
+</div>
 
 <div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #3498db;border-radius:4px;">
-    <h3 style="margin:0 0 10px;color:#3498db;">2026-05-09 — 멀티 서버 + 릴레이 + 마을별 큐</h3>
+    <h3 style="margin:0 0 10px;color:#3498db;">🌐 서브 서버 (스캐빈징 전용) — 신규</h3>
     <ul style="margin:0;padding-left:20px;color:#ddd;">
-        <li><b>🌐 서브 서버 (스캐빈징 전용)</b> — 메인 서버 외 추가 서버에서 스캐빈징만 자동 운영. 각 서브는 자기 봇 탭/락/캡차 상태 (메인과 완전 격리). 자동화 탭 → 서브 서버 섹션</li>
-        <li><b>🔁 릴레이 공격</b> — 한 마을이 자기 부대 돌아오면 같은 곳 다시 공격. 90% 임계로 손실 허용 (있는 만큼 발사). 부대 죽으면 자동 정지. 이미 진행 중인 공격 자동 감지해 이어받음</li>
-        <li><b>🗡 동줍 모드 추가</b> — "C 우선 + B 폴백" — C 가능한 row는 C로, 없으면 B 템플릿으로</li>
-        <li><b>🏘 마을별 독립 타이머</b> — 동줍/양성 모두 마을별 독립 처리. 빠른 마을 즉시 처리, 느린 마을 따로 대기. BotLock으로 자연 직렬화</li>
+        <li>메인 서버 외 추가 서버 N개에서 스캐빈징 동시 운영</li>
+        <li>각 서브는 자기 봇 탭 + 자기 BotLock + 자기 캡차 상태 → 메인과 완전 격리</li>
+        <li>서브 캡차 떠도 메인은 계속 동작, 메인 캡차 떠도 서브는 계속</li>
+        <li>UI: 자동화 탭 → "🌐 서브 서버" 섹션 → 서버 추가 → 마을/병종 선택 → 시작</li>
+    </ul>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #e74c3c;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#e74c3c;">🔁 릴레이 공격 — 신규</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>한 마을이 자기 부대 돌아오면 같은 좌표로 자동 재발사 (왕복 반복)</li>
+        <li>병력 90% 이상 남으면 있는 만큼 발사 (손실 허용), 90% 미만이면 자동 정지</li>
+        <li>이미 진행 중인 공격 자동 감지 → 릴레이가 이어받음 (수동 발사 후 추가 가능)</li>
+        <li>최대 웨이브 수 / 봇 프로텍션 감지 시 자동 정지</li>
+        <li>UI: 자동화 탭 → "🔁 릴레이 공격" 섹션 → 11종 병력 직접 입력 또는 템플릿 선택</li>
     </ul>
 </div>
 
 <div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #27ae60;border-radius:4px;">
-    <h3 style="margin:0 0 10px;color:#27ae60;">스캐빈징 개선</h3>
+    <h3 style="margin:0 0 10px;color:#27ae60;">🏘 마을별 독립 큐 — 동줍 / 양성</h3>
     <ul style="margin:0;padding-left:20px;color:#ddd;">
-        <li><b>마을별 병종 선택</b> — 창/검/도끼/궁 중 마을마다 다르게 사용 가능. 빈 선택 = 그 마을 스킵</li>
-        <li><b>발사 전 병력 사전 체크</b> — squad의 troops가 home 보유량 초과면 그 squad만 스킵 (헛 API 호출 방지)</li>
-        <li><b>API 실패 시 상세 로그</b> — squad_responses 내용 + 옵션 상태 출력 (서버 거절 사유 정확히 파악)</li>
-        <li><b>중지 버튼</b> — 자동 스캐빈징 시작 시 표시</li>
+        <li>이전: 글로벌 배치 — 모든 마을 한 라운드 처리 후 다음 라운드 대기 (이른 복귀 마을 idle)</li>
+        <li>변경: 마을별 setTimeout — 각 마을이 자기 부대 복귀 시각에 자기만 처리</li>
+        <li>BotLock으로 동시 충돌 자동 직렬화 (한 번에 한 마을씩 봇 탭 사용)</li>
+        <li>로그 형식: <code>[동줍:마을명]</code>, <code>[양성:마을명]</code></li>
+        <li>쿨다운도 마을별 독립 — A 마을이 보낸 타겟에 B 마을 동시 공격 가능</li>
     </ul>
 </div>
 
-<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #e67e22;border-radius:4px;">
-    <h3 style="margin:0 0 10px;color:#e67e22;">동줍 개선</h3>
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #f39c12;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#f39c12;">🛡 스캐빈징 마을별 병종 선택</h3>
     <ul style="margin:0;padding-left:20px;color:#ddd;">
-        <li><b>2단계 필터 전략</b> — 1단계: "공격중 마을 숨김" (자원 누적 마을 우선) → 0 row면 2단계: "공격중 포함" + 30분 쿨다운</li>
-        <li><b>거리순 정렬</b> — TW Farm Assistant `order=distance&dir=asc` (캡처 검증) — 가까운 마을 먼저</li>
-        <li><b>30분 쿨다운</b> — 같은 타겟 30분 간격 (마을별 독립, cross-village 차단 X)</li>
-        <li><b>중지 버튼</b> — 자동 동줍 시작 시 표시</li>
+        <li>마을마다 창/검/도끼/궁 중 사용할 병종 체크박스 선택</li>
+        <li>한 병종 다 끄면 그 마을 자동 스킵 (병종만 골라 끄는 명시적 제외)</li>
+        <li>발사 전 병력 사전 체크 — squad troops가 home 보유량 초과면 그 squad만 스킵 (헛 API 호출 방지)</li>
+        <li>API 실패 시 상세 로그 — squad_responses 내용 + 옵션 상태 (서버 거절 사유 정확 파악)</li>
+        <li>UI: 동줍과 동일하게 마을 row마다 4개 체크박스</li>
     </ul>
 </div>
 
 <div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #9b59b6;border-radius:4px;">
-    <h3 style="margin:0 0 10px;color:#9b59b6;">병력 양성 개선</h3>
+    <h3 style="margin:0 0 10px;color:#9b59b6;">🗡 동줍 개선</h3>
     <ul style="margin:0;padding-left:20px;color:#ddd;">
-        <li><b>건물별 병종 1개 선택 UI</b> — 마구간 / 막사 / 대장간. 우선순위 고정 (마구간 > 막사 > 대장간). 자원 부족 시 우선순위 보존</li>
-        <li><b>마을별 독립 처리</b> — 큐 빨리 비는 마을 즉시 보충</li>
+        <li><b>모드 추가</b>: "C 우선 + B 폴백" — C 가능 row는 C로, 없으면 B 템플릿</li>
+        <li>쿨다운 30분 (이전 왕복시간 → 고정 30분)</li>
     </ul>
 </div>
 
 <div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #e94560;border-radius:4px;">
-    <h3 style="margin:0 0 10px;color:#e94560;">캡차 자동 해결 개선</h3>
+    <h3 style="margin:0 0 10px;color:#e94560;">🤖 캡차 자동 해결 (hCaptcha 체크박스)</h3>
     <ul style="margin:0;padding-left:20px;color:#ddd;">
-        <li><b>Begin 버튼</b> — scrollIntoView 적용 ✅검증됨 (Begin 클릭 안정 통과)</li>
-        <li><b>hCaptcha 체크박스</b> — iframe sessionId에 직접 evaluate로 #checkbox 정확 좌표 조회 → CDP 마우스 이벤트. 위치 추정 폐기. 실패 시 다음 tick 재시도</li>
+        <li>이전: iframe 위치 추정 클릭 (10~20% × 40~60%) — 빗맞아 매번 미해결</li>
+        <li>변경: iframe sessionId에 직접 evaluate로 <code>#checkbox.getBoundingClientRect()</code> 정확 좌표 조회</li>
+        <li>절대 좌표(iframe outer + inner)에 CDP 마우스 이벤트 → 정확한 위치 클릭</li>
+        <li>클릭 후 <code>aria-checked === 'true'</code> 검증, 실패 시 다음 tick 재시도</li>
+        <li>아직 실측 검증 중 — 다음 캡차에서 결과 확인</li>
     </ul>
 </div>
 
 <div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #95a5a6;border-radius:4px;">
-    <h3 style="margin:0 0 10px;color:#95a5a6;">기타</h3>
+    <h3 style="margin:0 0 10px;color:#95a5a6;">🔧 기타 수정</h3>
     <ul style="margin:0;padding-left:20px;color:#ddd;">
-        <li>마을 감지: 페이지 사이즈 25 → 1000으로 (1000+ 마을 한 번에 감지)</li>
+        <li>서버 목록 감지 응답 형식 호환 — <code>{response:{html}}</code> 새 형식 지원</li>
+        <li>서버 감지 디버그 로그 강화 (status / bodyLen / htmlLen / 응답 시작)</li>
+        <li>자동 진입 후 전체 서버 목록 자동 갱신 (서브 추가용)</li>
+    </ul>
+</div>
+
+<!-- ===== 2026-05-01 (이전 푸시 묶음) ===== -->
+<div style="margin:24px 0 8px;padding:6px 12px;background:#1a1a2e;border-radius:4px;">
+    <b style="color:#fff;font-size:14px;">📅 2026-05-01</b>
+    <span style="color:#888;font-size:11px;margin-left:8px;">초기 핵심 기능 구축</span>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #e67e22;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#e67e22;">🗡 동줍 자동화 — 신규</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>Farm Assistant 자동 클릭 (A/B 템플릿 + C 보고서 기반)</li>
+        <li>2단계 필터 전략 — 1단계: 공격중 마을 숨김 (자원 누적 우선) → 0 row면 2단계: 공격중 포함 + 쿨다운</li>
+        <li>거리순 정렬 (<code>order=distance&dir=asc</code>) — 가까운 마을 먼저</li>
+        <li>적응형 쿨다운 (보고서 평균 loot 기반)</li>
+        <li>마을 1000개 한 번에 감지 (page_size 25 → 1000)</li>
+        <li>모드: A만 / B만 / C / C 우선 + A 폴백</li>
+    </ul>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #9b59b6;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#9b59b6;">🎓 병력 양성 — 신규</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>마구간/막사/대장간 자동 양성 (큐 빈 상태 감지 후 1마리씩 발주)</li>
+        <li>건물별 병종 1개 선택 UI (드롭다운)</li>
+        <li>우선순위 고정: 마구간 > 막사 > 대장간</li>
+        <li>자원 부족 시 우선순위 보존 (뒤 항목 스킵)</li>
+    </ul>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #1abc9c;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#1abc9c;">⚔ 트레인 공격 — 신규</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>다중 마을 × 다중 웨이브 트레인 발사 — 도착 시간창 안 분산</li>
+        <li>노블 트레인 sequence 모드 — 250ms 정확 간격</li>
+        <li>타겟 랜덤 분산 (마을 × 웨이브 단위)</li>
+        <li>병력 자동 균등 배분 (노블 없는 자원 트레인 가능)</li>
+        <li>즉시 발사 모드 (스케줄러 우회)</li>
+        <li>공격/원군 템플릿 저장 + 편집</li>
+    </ul>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #34495e;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#34495e;">🔧 안정성 — 초기</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>로그인 자동: 직접 value setter 사용해 Chrome autofill 차단 (charcter-by-character 타이핑 버그 fix)</li>
+        <li>로그인 타임아웃 20s → 40s + 최종 상태 검증</li>
         <li>보고서 수집기 regex 수정 (loot 데이터 정상 추출)</li>
-        <li>자동 로그인: 직접 value setter 사용해 Chrome autofill 차단</li>
-        <li>로그인 타임아웃 20s → 40s + 최종 검증 추가</li>
+        <li>병력 조회: home_units endpoint 사용 (units_info 폐기)</li>
+        <li>스케줄러 자동 복원 (서버 재시작 후 큐 자동 재개)</li>
+    </ul>
+</div>
+
+<!-- ===== 2026-04-30 ===== -->
+<div style="margin:24px 0 8px;padding:6px 12px;background:#1a1a2e;border-radius:4px;">
+    <b style="color:#fff;font-size:14px;">📅 2026-04-30</b>
+    <span style="color:#888;font-size:11px;margin-left:8px;">초기 구조</span>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #16a085;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#16a085;">📋 공격 / 트레인 / 자동복원 기반</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>예약 공격 + 트레인 공격 발사 시스템</li>
+        <li>공격/원군 템플릿 시스템</li>
+        <li>UI 탭 구조 (공격 / 자동화 / 예약 목록)</li>
+        <li>봇 자동 복구 — 서버 재시작 시 큐 상태 복원</li>
+    </ul>
+</div>
+
+<!-- ===== 2026-04-27 ===== -->
+<div style="margin:24px 0 8px;padding:6px 12px;background:#1a1a2e;border-radius:4px;">
+    <b style="color:#fff;font-size:14px;">📅 2026-04-27</b>
+    <span style="color:#888;font-size:11px;margin-left:8px;">프로젝트 시작</span>
+</div>
+
+<div style="margin-bottom:24px;padding:14px;background:#0f3460;border-left:4px solid #7f8c8d;border-radius:4px;">
+    <h3 style="margin:0 0 10px;color:#7f8c8d;">🚀 bujok-new 초기 커밋</h3>
+    <ul style="margin:0;padding-left:20px;color:#ddd;">
+        <li>TW 자동화 봇 기반 — Chrome + CDP + Node.js</li>
+        <li>웹 UI 서버 구조 (Express 없이 http 기본 모듈)</li>
     </ul>
 </div>
 

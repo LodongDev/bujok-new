@@ -19,12 +19,14 @@ const { farmAllVillages } = require('./lib/farm-auto');
 const FarmQueue = require('./lib/farm-queue');
 const BuildingQueue = require('./lib/building-queue');
 const { TrainerQueue, DEFAULT_PLAN: DEFAULT_TRAIN_PLAN } = require('./lib/trainer-queue');
+const RelayQueue = require('./lib/relay-queue');
+const SubServer = require('./lib/sub-server');
 const BotLock = require('./lib/bot-lock');
 const ReportCollector = require('./lib/report-collector');
 const { checkBotProtection } = require('./lib/bot-protection');
 const persist = require('./lib/persist');
 const { HCAPTCHA_SOLVER, GAME_BOT_SOLVER } = require('./lib/captcha-userscripts');
-const { killAllChrome, launchChrome, waitForCDP, loginAndDetectServers, enterServer } = require('./lib/launcher');
+const { killAllChrome, launchChrome, waitForCDP, loginAndDetectServers, enterServer, detectServersFromGame } = require('./lib/launcher');
 const log = require('./lib/log');
 
 // ==========================================
@@ -72,6 +74,8 @@ let state = {
     buildPriorities: {},
     trainerQueue: null,
     trainPlan: null, // [{building, unit, count}] — 저장된 양성 계획
+    relayQueue: null,
+    subServers: new Map(),  // serverName → SubServer (서브 서버, 스캐빈징만)
     reportCollector: null,
     botLock: new BotLock(),
     botProtection: null,    // { detected: true, type: '...', at: timestamp }
@@ -81,6 +85,46 @@ let state = {
     error: null,
 };
 
+// 서브 서버 영구화 — 메인 서버 state 파일에 subServers 키로 저장
+function _saveSubServersState() {
+    if (!state.server) return;
+    const list = [];
+    for (const sub of state.subServers.values()) {
+        list.push({
+            server: sub.server,
+            scavenge: sub.scavConfig || null,  // null이면 큐 미시작 (탭만 열린 상태)
+        });
+    }
+    if (list.length === 0) {
+        persist.setKey(state.server, 'subServers', null);
+    } else {
+        persist.setKey(state.server, 'subServers', list);
+    }
+}
+
+// 릴레이 세션 영구화 — 서버 재시작 시 복원
+function _saveRelayState() {
+    if (!state.server) return;
+    if (!state.relayQueue) {
+        persist.setKey(state.server, 'relay', null);
+        return;
+    }
+    const sessions = state.relayQueue.status().sessions
+        .filter(s => s.status !== 'completed' && s.status !== 'stopped')
+        .map(s => ({
+            sourceVillageId: s.sourceVillageId,
+            targetX: s.targetX, targetY: s.targetY,
+            troops: s.troops,
+            maxWaves: s.maxWaves,
+            currentWave: s.currentWave,
+        }));
+    if (sessions.length === 0) {
+        persist.setKey(state.server, 'relay', null);
+    } else {
+        persist.setKey(state.server, 'relay', { sessions });
+    }
+}
+
 // 모든 큐를 일시정지 (persist는 유지 — 재개 시 복원 위해)
 function pauseAllQueues() {
     state.scavQueue?.stop();
@@ -88,12 +132,14 @@ function pauseAllQueues() {
     state.farmQueue?.stop();
     state.buildQueue?.stop();
     state.trainerQueue?.stop();
+    state.relayQueue?.stopAll('user_pause');
     state.reportCollector?.stop();
     state.scavQueue = null;
     state.marketQueue = null;
     state.farmQueue = null;
     state.buildQueue = null;
     state.trainerQueue = null;
+    state.relayQueue = null;
 }
 
 // 유저스크립트 자동 주입 비활성화 — hCaptcha 점수 시스템이 영구 setInterval/전역변수 감지
@@ -193,6 +239,7 @@ async function handleBotProtection(detail) {
     state.farmQueue?.stop();
     state.buildQueue?.stop();
     state.trainerQueue?.stop();
+    state.relayQueue?.stopAll('bot_protection');
 
     // 1. DOM 덤프 (분석용)
     try {
@@ -466,24 +513,86 @@ async function attemptAutoSolveCaptcha() {
                     return;
                 }
             }
-            // (c) hCaptcha iframe — iframe 위치에서 checkbox 추정 좌표 클릭
+            // (c) hCaptcha iframe — iframe 안 #checkbox 정확한 좌표 직접 조회 (cross-origin OK via CDP)
+            // 위치 추정 폐기: iframe sessionId에 evaluate로 #checkbox.getBoundingClientRect() 직접 조회
+            // 검증 실패 시 done.checkbox 박제 안 함 → 다음 tick 재시도
             if (!done.checkbox) {
                 const iframeRect = await getElementRect(targetSession, `
                     document.querySelector('iframe[src*="hcaptcha.com"][src*="frame=checkbox"]')
                     || document.querySelector('iframe[src*="hcaptcha.com"]')
                 `);
                 if (iframeRect) {
-                    // hCaptcha 체크박스는 iframe 좌측 영역에 있음 (15~25% from left, 중앙)
-                    const target = {
-                        x: iframeRect.x + iframeRect.w * (0.10 + Math.random() * 0.10),
-                        y: iframeRect.y + iframeRect.h * (0.40 + Math.random() * 0.20),
-                    };
-                    log.info(`[캡차] hCaptcha iframe 발견 — 체크박스 위치 추정 클릭`);
-                    // 인간 반응 시간 시뮬레이션 (2~4초)
+                    // 1) iframe CDP sessionId 찾기 (Target.attachedToTarget로 자동 attach됨)
+                    let iframeSession = findIframeSession(['frame=checkbox', 'hcaptcha.com']);
+                    if (!iframeSession) {
+                        await discoverIframeTargets();
+                        iframeSession = findIframeSession(['frame=checkbox', 'hcaptcha.com']);
+                    }
+                    let target = null;
+                    let cbInfo = null;
+                    if (iframeSession) {
+                        // 2) iframe 안에서 #checkbox 정확한 좌표 + aria-checked 조회
+                        cbInfo = await evaluate(state.cdp, iframeSession.sid, `
+                            (() => {
+                                const el = document.getElementById('checkbox');
+                                if (!el) return { found: false };
+                                const r = el.getBoundingClientRect();
+                                return {
+                                    found: true,
+                                    x: r.x, y: r.y, w: r.width, h: r.height,
+                                    checked: el.getAttribute('aria-checked') === 'true',
+                                };
+                            })()
+                        `).catch(() => null);
+                        if (cbInfo?.checked) {
+                            log.ok(`[캡차] ✅ #checkbox 이미 aria-checked=true`);
+                            done.checkbox = true;
+                            elapsed += interval;
+                            if (elapsed < maxElapsed) setTimeout(tick, interval + Math.floor(Math.random() * 1000));
+                            return;
+                        }
+                        if (cbInfo?.found && cbInfo.w > 0 && cbInfo.h > 0) {
+                            // 3) 절대 좌표 = iframe outer pos + checkbox inner pos + 랜덤 offset
+                            target = {
+                                x: iframeRect.x + cbInfo.x + cbInfo.w * (0.3 + Math.random() * 0.4),
+                                y: iframeRect.y + cbInfo.y + cbInfo.h * (0.3 + Math.random() * 0.4),
+                            };
+                            log.info(`[캡차] iframe #checkbox (${Math.round(cbInfo.x)},${Math.round(cbInfo.y)},${Math.round(cbInfo.w)}x${Math.round(cbInfo.h)}) → 절대 (${Math.round(target.x)},${Math.round(target.y)})`);
+                        }
+                    }
+                    if (!target) {
+                        // fallback: iframe 안 접근 실패 — 표준 hCaptcha 레이아웃 (좌측 24px 중심)
+                        log.warn(`[캡차] iframe 안 #checkbox 조회 실패 — fallback 좌표 (iframeSession=${!!iframeSession}, cbInfo=${JSON.stringify(cbInfo)})`);
+                        target = {
+                            x: iframeRect.x + iframeRect.w * (0.04 + Math.random() * 0.08),
+                            y: iframeRect.y + iframeRect.h * (0.40 + Math.random() * 0.20),
+                        };
+                    }
+                    // 인간 반응 시간 (2~4초)
                     await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
                     await mouse.moveAndClick(state.cdp, targetSession, lastMousePos, target);
                     lastMousePos = target;
-                    done.checkbox = true;
+
+                    // 4) 클릭 검증 — 2초 대기 후 iframe 안 aria-checked 재조회
+                    await new Promise(r => setTimeout(r, 2000));
+                    if (iframeSession) {
+                        const verified = await evaluate(state.cdp, iframeSession.sid, `
+                            (() => {
+                                const el = document.getElementById('checkbox');
+                                return el ? el.getAttribute('aria-checked') === 'true' : false;
+                            })()
+                        `).catch(() => false);
+                        if (verified) {
+                            log.ok(`[캡차] ✅ 체크박스 클릭 성공 (aria-checked=true)`);
+                            done.checkbox = true;
+                        } else {
+                            log.warn(`[캡차] 체크박스 클릭 미반영 — 다음 tick 재시도`);
+                            // done.checkbox=false 유지 → 다음 tick에서 다시 시도
+                        }
+                    } else {
+                        // iframe session 없으면 검증 불가 — 페이지 전체 해제 검사로만 판단
+                        done.checkbox = true;
+                    }
                 }
             }
             // 해제 확인
@@ -549,8 +658,8 @@ async function restoreQueues() {
             if (targets.length) {
                 state.scavQueue = new ScavengeQueue(state.cdp, state.botSessionId, baseUrl,
                     state.scheduler, state.botLock, handleBotProtection);
-                await state.scavQueue.start(targets);
-                log.ok(`[복원] 스캐빈징 큐 — ${targets.length}개 마을`);
+                await state.scavQueue.start(targets, { unitsByVillage: saved.scavenge.unitsByVillage || {} });
+                log.ok(`[복원] 스캐빈징 큐 — ${targets.length}개 마을 (병종 설정 ${Object.keys(saved.scavenge.unitsByVillage || {}).length}개)`);
             }
         } catch (e) { log.warn(`[복원] 스캐빈징 실패: ${e.message}`); }
     }
@@ -591,6 +700,52 @@ async function restoreQueues() {
                 log.ok(`[복원] 양성 큐 — ${targets.length}개 마을`);
             }
         } catch (e) { log.warn(`[복원] 양성 실패: ${e.message}`); }
+    }
+
+    if (saved.relay?.sessions?.length) {
+        try {
+            state.relayQueue = new RelayQueue(state.cdp, state.botSessionId, baseUrl,
+                state.scheduler, state.botLock, handleBotProtection);
+            let n = 0;
+            for (const s of saved.relay.sessions) {
+                const sv = state.villages.find(v => v.id === s.sourceVillageId);
+                if (!sv) continue;
+                try {
+                    await state.relayQueue.addSession({
+                        sourceVillage: sv,
+                        targetX: s.targetX, targetY: s.targetY,
+                        troops: s.troops,
+                        maxWaves: s.maxWaves,
+                        _restored: true,
+                        _currentWave: s.currentWave,
+                    });
+                    n++;
+                } catch (e) { log.warn(`[복원] 릴레이 세션 실패: ${e.message}`); }
+            }
+            if (n) log.ok(`[복원] 릴레이 큐 — ${n}개 세션`);
+            else state.relayQueue = null;
+        } catch (e) { log.warn(`[복원] 릴레이 실패: ${e.message}`); }
+    }
+
+    // 서브 서버 복원 (스캐빈징 전용 추가 서버)
+    if (Array.isArray(saved.subServers) && saved.subServers.length > 0) {
+        for (const entry of saved.subServers) {
+            try {
+                const sub = new SubServer(state.cdp, entry.server);
+                state.subServers.set(entry.server, sub);
+                await sub.start();
+                if (entry.scavenge?.villageIds?.length) {
+                    await sub.startScavenge({
+                        villageIds: entry.scavenge.villageIds,
+                        unitsByVillage: entry.scavenge.unitsByVillage || {},
+                    });
+                }
+                log.ok(`[복원] 서브 서버 ${entry.server} — 스캐빈징 ${entry.scavenge ? '시작' : '대기'}`);
+            } catch (e) {
+                log.warn(`[복원] 서브 ${entry.server} 실패: ${e.message}`);
+                state.subServers.delete(entry.server);
+            }
+        }
     }
 
     if (saved.build?.villageIds?.length) {
@@ -831,6 +986,13 @@ async function selectServer(serverName) {
         state.phase = 'detecting';
         state.villages = await detectVillages(state.cdp, state.botSessionId, baseUrl);
         log.ok(`마을 ${state.villages.length}개 감지`);
+
+        // 서브 서버 선택용 — 전체 서버 목록 조회 (api/world_switch)
+        try {
+            const r = await detectServersFromGame(state.cdp, state.botSessionId);
+            if (r?.success) state.servers = r.servers || [];
+            log.info(`전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
+        } catch (e) { log.warn(`서버 목록 감지 실패: ${e.message}`); }
 
         // 4. 스케줄러도 봇 탭 사용
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);
@@ -1369,13 +1531,15 @@ function startServer() {
             return;
         }
 
-        // POST /api/scavenge/run — body: { villageIds: [...], auto: bool }
+        // POST /api/scavenge/run — body: { villageIds, auto, unitsByVillage }
+        // unitsByVillage: { villageId: ['spear','axe',...] } — 마을별 허용 병종 (생략시 전체)
         if (pathname === '/api/scavenge/run' && req.method === 'POST') {
             const baseUrl = `https://${state.server}.tribalwars.net`;
             try {
                 const body = JSON.parse(await readBody(req));
                 const selectedIds = body.villageIds || [];
                 const autoMode = body.auto || false;
+                const unitsByVillage = body.unitsByVillage || {};
                 const targetVillages = selectedIds.length > 0
                     ? state.villages.filter(v => selectedIds.includes(v.id))
                     : state.villages;
@@ -1389,20 +1553,41 @@ function startServer() {
                         state.botLock,
                         handleBotProtection
                     );
-                    await state.scavQueue.start(targetVillages);
-                    persist.setKey(state.server, 'scavenge', { villageIds: targetVillages.map(v => v.id) });
+                    await state.scavQueue.start(targetVillages, { unitsByVillage });
+                    persist.setKey(state.server, 'scavenge', {
+                        villageIds: targetVillages.map(v => v.id),
+                        unitsByVillage,
+                    });
                     log.ok('[스캐빈징 자동] 큐 시작');
                     json(res, { success: true, auto: true, status: state.scavQueue.status() });
                 } else {
                     // 1회 실행 (즉시)
                     if (state.scavengeRunning) { json(res, { success: false, error: '이미 실행 중' }); return; }
                     state.scavengeRunning = true;
-                    const { results } = await scavengeAll(state.cdp, state.botSessionId, baseUrl, targetVillages);
+                    const { results } = await scavengeAll(state.cdp, state.botSessionId, baseUrl, targetVillages, null, { unitsByVillage });
                     state.scavengeRunning = false;
                     json(res, { success: true, results, auto: false });
                 }
             } catch (e) {
                 state.scavengeRunning = false;
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // POST /api/scavenge/update-units — 큐 마을별 병종 동적 변경
+        // body: { unitsByVillage: { villageId: ['spear',...] } }
+        if (pathname === '/api/scavenge/update-units' && req.method === 'POST') {
+            try {
+                const body = JSON.parse(await readBody(req));
+                const unitsByVillage = body.unitsByVillage || {};
+                if (!state.scavQueue) { json(res, { success: false, error: '큐가 없음' }); return; }
+                state.scavQueue.updateUnitsByVillage(unitsByVillage);
+                // persist 업데이트 (기존 villageIds 유지)
+                const cur = persist.load(state.server)?.scavenge || {};
+                persist.setKey(state.server, 'scavenge', { ...cur, unitsByVillage });
+                json(res, { success: true });
+            } catch (e) {
                 json(res, { success: false, error: e.message });
             }
             return;
@@ -1433,7 +1618,9 @@ function startServer() {
                 const villageIds = body.villageIds || [];
                 if (!state.scavQueue) { json(res, { success: false, error: '큐가 없음' }); return; }
                 state.scavQueue.updateSelection(villageIds);
-                persist.setKey(state.server, 'scavenge', { villageIds });
+                // unitsByVillage 보존
+                const cur = persist.load(state.server)?.scavenge || {};
+                persist.setKey(state.server, 'scavenge', { ...cur, villageIds });
                 json(res, { success: true, status: state.scavQueue.status() });
             } catch (e) {
                 json(res, { success: false, error: e.message });
@@ -1639,6 +1826,182 @@ function startServer() {
             return;
         }
 
+        // ==========================================
+        // 릴레이 공격 — 동줍처럼 부대 복귀 시 자동 재발사
+        // ==========================================
+        // POST /api/relay/start
+        // body: { sourceVillageId, targetX, targetY, troops:{spear:N,...}, maxWaves }
+        if (pathname === '/api/relay/start' && req.method === 'POST') {
+            try {
+                if (!state.server) { json(res, { success: false, error: '서버 미선택' }); return; }
+                const body = JSON.parse(await readBody(req));
+                const sourceVillage = state.villages.find(v => v.id === parseInt(body.sourceVillageId));
+                if (!sourceVillage) { json(res, { success: false, error: '출발 마을 없음' }); return; }
+                const targetX = parseInt(body.targetX);
+                const targetY = parseInt(body.targetY);
+                if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) { json(res, { success: false, error: '타겟 좌표 잘못됨' }); return; }
+                const troops = body.troops || {};
+                if (!Object.values(troops).some(n => n > 0)) { json(res, { success: false, error: '병력 필요' }); return; }
+                const maxWaves = parseInt(body.maxWaves) || 5;
+
+                // 큐 lazily 생성
+                if (!state.relayQueue) {
+                    const baseUrl = `https://${state.server}.tribalwars.net`;
+                    state.relayQueue = new RelayQueue(
+                        state.cdp, state.botSessionId, baseUrl,
+                        state.scheduler, state.botLock, handleBotProtection,
+                    );
+                }
+                const session = await state.relayQueue.addSession({
+                    sourceVillage, targetX, targetY, troops, maxWaves,
+                });
+                // persist
+                _saveRelayState();
+                json(res, { success: true, session: { id: session.id } });
+            } catch (e) {
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // POST /api/relay/stop — body: { sessionId? } (없으면 전체)
+        if (pathname === '/api/relay/stop' && req.method === 'POST') {
+            try {
+                const body = JSON.parse(await readBody(req) || '{}');
+                if (!state.relayQueue) { json(res, { success: true }); return; }
+                if (body.sessionId) {
+                    state.relayQueue.removeSession(parseInt(body.sessionId));
+                } else {
+                    state.relayQueue.stopAll('manual');
+                }
+                _saveRelayState();
+                json(res, { success: true });
+            } catch (e) {
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // GET /api/relay/status
+        if (pathname === '/api/relay/status' && req.method === 'GET') {
+            json(res, state.relayQueue ? state.relayQueue.status() : { running: false, stopped: true, sessions: [] });
+            return;
+        }
+
+        // ==========================================
+        // 서브 서버 (스캐빈징 전용) — 메인과 격리, 자기 봇 탭 사용
+        // ==========================================
+        // GET /api/sub-servers — 활성 서브 서버 목록 + 사용 가능 서버 목록 (매번 재감지)
+        if (pathname === '/api/sub-servers' && req.method === 'GET') {
+            const list = [];
+            for (const sub of state.subServers.values()) list.push(sub.status());
+            // 항상 fresh 감지 (state.servers는 cache, 비어있을 수도 있음)
+            let available = state.servers || [];
+            if (state.cdp && state.botSessionId) {
+                try {
+                    const r = await detectServersFromGame(state.cdp, state.botSessionId);
+                    if (r?.success && r.servers?.length) {
+                        available = r.servers;
+                        state.servers = available;
+                    }
+                } catch (e) { log.warn(`[sub-servers] 감지 실패: ${e.message}`); }
+            }
+            json(res, { subServers: list, available });
+            return;
+        }
+
+        // POST /api/sub-server/add — body: { server }
+        // 새 봇 탭 열고 게임 진입 + 마을 감지
+        if (pathname === '/api/sub-server/add' && req.method === 'POST') {
+            try {
+                const body = JSON.parse(await readBody(req));
+                const serverName = body.server;
+                if (!serverName) { json(res, { success: false, error: 'server 필요' }); return; }
+                if (serverName === state.server) { json(res, { success: false, error: '메인 서버는 서브로 추가 불가' }); return; }
+                if (state.subServers.has(serverName)) { json(res, { success: false, error: '이미 추가됨' }); return; }
+                if (!state.cdp) { json(res, { success: false, error: 'CDP 없음' }); return; }
+
+                const sub = new SubServer(state.cdp, serverName);
+                state.subServers.set(serverName, sub);
+                try {
+                    await sub.start();
+                } catch (e) {
+                    state.subServers.delete(serverName);
+                    json(res, { success: false, error: e.message });
+                    return;
+                }
+                _saveSubServersState();
+                json(res, { success: true, status: sub.status() });
+            } catch (e) {
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // POST /api/sub-server/remove — body: { server } — 서브 종료 + 탭 닫기
+        if (pathname === '/api/sub-server/remove' && req.method === 'POST') {
+            try {
+                const body = JSON.parse(await readBody(req));
+                const sub = state.subServers.get(body.server);
+                if (!sub) { json(res, { success: false, error: '서브 없음' }); return; }
+                await sub.stop();
+                state.subServers.delete(body.server);
+                _saveSubServersState();
+                json(res, { success: true });
+            } catch (e) {
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // GET /api/sub-server/:server/villages — 서브의 마을 목록 (UI 체크박스용)
+        const subVillagesMatch = pathname.match(/^\/api\/sub-server\/([^/]+)\/villages$/);
+        if (subVillagesMatch && req.method === 'GET') {
+            const sub = state.subServers.get(subVillagesMatch[1]);
+            if (!sub) { json(res, { villages: [] }); return; }
+            json(res, { villages: sub.villages });
+            return;
+        }
+
+        // POST /api/sub-server/:server/scavenge/start — body: { villageIds, unitsByVillage }
+        const subScavStartMatch = pathname.match(/^\/api\/sub-server\/([^/]+)\/scavenge\/start$/);
+        if (subScavStartMatch && req.method === 'POST') {
+            try {
+                const sub = state.subServers.get(subScavStartMatch[1]);
+                if (!sub) { json(res, { success: false, error: '서브 없음' }); return; }
+                const body = JSON.parse(await readBody(req));
+                await sub.startScavenge({
+                    villageIds: body.villageIds || [],
+                    unitsByVillage: body.unitsByVillage || {},
+                });
+                _saveSubServersState();
+                json(res, { success: true, status: sub.status() });
+            } catch (e) {
+                json(res, { success: false, error: e.message });
+            }
+            return;
+        }
+
+        // POST /api/sub-server/:server/scavenge/stop
+        const subScavStopMatch = pathname.match(/^\/api\/sub-server\/([^/]+)\/scavenge\/stop$/);
+        if (subScavStopMatch && req.method === 'POST') {
+            const sub = state.subServers.get(subScavStopMatch[1]);
+            if (!sub) { json(res, { success: false, error: '서브 없음' }); return; }
+            sub.stopScavenge();
+            _saveSubServersState();
+            json(res, { success: true });
+            return;
+        }
+
+        // GET /api/sub-server/:server/scavenge/status
+        const subScavStatusMatch = pathname.match(/^\/api\/sub-server\/([^/]+)\/scavenge\/status$/);
+        if (subScavStatusMatch && req.method === 'GET') {
+            const sub = state.subServers.get(subScavStatusMatch[1]);
+            if (!sub) { json(res, { running: false, stopped: true }); return; }
+            json(res, sub.status().scavenge || { running: false, stopped: true });
+            return;
+        }
+
         // GET /api/build/status
         if (pathname === '/api/build/status' && req.method === 'GET') {
             json(res, state.buildQueue ? state.buildQueue.status() : { running: false, stopped: true, villages: [] });
@@ -1785,8 +2148,14 @@ async function cleanupForSwitch() {
     state.farmQueue?.stop();
     state.buildQueue?.stop();
     state.trainerQueue?.stop();
+    state.relayQueue?.stopAll('server_switch');
     state.reportCollector?.stop();
     state.reportCollector = null;
+    // 서브 서버 모두 종료 (탭 닫기)
+    for (const sub of state.subServers.values()) {
+        try { await sub.stop(); } catch (e) { log.warn(`[정리] 서브 ${sub.server} 종료 실패: ${e.message}`); }
+    }
+    state.subServers.clear();
 
     // 진행 중 작업이 있으면 끝날 때까지 대기 (최대 30초)
     const waitStart = Date.now();
@@ -1969,6 +2338,13 @@ async function autoSelectExistingServer(serverName) {
         state.phase = 'detecting';
         state.villages = await detectVillages(state.cdp, state.botSessionId, baseUrl);
         log.ok(`[자동연결] 마을 ${state.villages.length}개 감지`);
+
+        // 서브 서버 선택용 — 전체 서버 목록 조회 (api/world_switch)
+        try {
+            const r = await detectServersFromGame(state.cdp, state.botSessionId);
+            if (r?.success) state.servers = r.servers || [];
+            log.info(`[자동연결] 전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
+        } catch (e) { log.warn(`[자동연결] 서버 목록 감지 실패: ${e.message}`); }
 
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);
         state.scheduler.start();

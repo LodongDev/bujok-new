@@ -462,6 +462,7 @@ label { min-width: 70px; }
         <label style="min-width:auto;"><input type="radio" name="farmMode" value="B" checked> B만 (기본)</label>
         <label style="min-width:auto;"><input type="radio" name="farmMode" value="C"> C (리포트 기반)</label>
         <label style="min-width:auto;"><input type="radio" name="farmMode" value="C_OR_A"> C 우선 + A 폴백</label>
+        <label style="min-width:auto;"><input type="radio" name="farmMode" value="C_OR_B"> C 우선 + B 폴백</label>
         <label style="min-width:auto;"><input type="radio" name="farmMode" value="A"> A만</label>
     </div>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
@@ -471,6 +472,50 @@ label { min-width: 70px; }
         <span id="farmStatus" style="font-size:13px;color:#888;"></span>
     </div>
     <div id="farmResults" style="margin-top:12px;"></div>
+</div>
+
+<h2>🔁 릴레이 공격</h2>
+<div class="panel">
+    <div style="font-size:12px;color:#888;margin-bottom:8px;">한 마을이 자기 부대 돌아오면 같은 곳에 다시 공격 보냄. 부대 죽으면 자동 정지.</div>
+    <div class="row">
+        <label style="min-width:80px;">출발 마을</label>
+        <select id="relaySourceVillage" style="flex:1;max-width:300px;"></select>
+    </div>
+    <div class="row">
+        <label style="min-width:80px;">타겟 좌표</label>
+        <input id="relayTargetX" type="number" placeholder="X" style="width:80px;">
+        <span>|</span>
+        <input id="relayTargetY" type="number" placeholder="Y" style="width:80px;">
+    </div>
+    <div class="row">
+        <label style="min-width:80px;">병력 템플릿</label>
+        <select id="relayTemplate" style="flex:1;max-width:300px;" onchange="applyRelayTemplate()"><option value="">— 직접 입력 —</option></select>
+    </div>
+    <div class="row" style="align-items:flex-start;">
+        <label style="min-width:80px;padding-top:6px;">병력</label>
+        <div id="relayTroopInputs" style="display:flex;flex-wrap:wrap;gap:6px;flex:1;"></div>
+    </div>
+    <div class="row">
+        <label style="min-width:80px;">최대 웨이브</label>
+        <input id="relayMaxWaves" type="number" value="5" min="1" max="100" style="width:80px;">
+    </div>
+    <div class="row">
+        <button class="btn btn-primary" onclick="addRelaySession()">▶ 세션 추가 (즉시 발사)</button>
+        <button class="btn btn-danger btn-small" onclick="stopAllRelay()">⏹ 전체 정지</button>
+        <span id="relayStatus" style="font-size:13px;color:#888;margin-left:10px;"></span>
+    </div>
+    <div id="relaySessionList" style="margin-top:12px;"></div>
+</div>
+
+<h2>🌐 서브 서버 (스캐빈징 전용)</h2>
+<div class="panel">
+    <div style="font-size:12px;color:#888;margin-bottom:8px;">메인 서버 외 추가 서버에서 스캐빈징만 자동 운영. 각 서브는 자기 봇 탭 사용 — 메인과 격리.</div>
+    <div class="row">
+        <label style="min-width:80px;">서버 추가</label>
+        <select id="subServerSelect" style="flex:1;max-width:200px;"><option value="">— 선택 —</option></select>
+        <button class="btn btn-primary btn-small" onclick="addSubServer()">➕ 추가 (탭 열기)</button>
+    </div>
+    <div id="subServerList" style="margin-top:12px;"></div>
 </div>
 
 </div><!-- /tabAuto -->
@@ -559,6 +604,8 @@ async function checkState() {
             await loadVillages();
             await loadTemplates();
             await syncQueueStates();   // 복원된 큐 상태를 UI에 반영
+            await loadSubServerSelect();
+            await renderSubServers();
             startPolling();
         }
     } catch {
@@ -780,6 +827,7 @@ async function loadVillages() {
         renderMktVillages();
         renderFarmVillages();
         renderTrainSourceCheckboxes();
+        renderRelaySourceVillage();
         await syncTrainerPlan();
         await loadBuildPriorityFromServer();
         renderBuildVillageSelect();
@@ -842,6 +890,7 @@ async function loadTemplates() {
         }
         syncTrainTemplateOptions();
         renderTemplateList();
+        syncRelayTemplateOptions();
     } catch (e) { console.warn('템플릿 로드 실패', e); }
 }
 
@@ -1523,14 +1572,67 @@ async function clearBotProtection() {
 // ==========================================
 // 스캐빈징
 // ==========================================
+// 마을별 스캐빈징 병종 설정 — localStorage에 저장
+const SCAV_UNITS_KEY = 'bujok_scav_units';
+const SCAV_UNIT_LIST = ['spear', 'sword', 'axe', 'archer'];
+const SCAV_UNIT_LABELS = { spear: '창', sword: '검', axe: '도끼', archer: '궁' };
+
+function loadScavUnits() {
+    try { return JSON.parse(localStorage.getItem(SCAV_UNITS_KEY) || '{}'); }
+    catch { return {}; }
+}
+function saveScavUnits(map) {
+    localStorage.setItem(SCAV_UNITS_KEY, JSON.stringify(map));
+}
+
+function getScavUnitsByVillage() {
+    const out = {};
+    document.querySelectorAll('.scav-village-row').forEach(row => {
+        const vid = parseInt(row.dataset.vid);
+        const sel = [...row.querySelectorAll('.scav-unit-cb:checked')].map(cb => cb.value);
+        out[vid] = sel;
+    });
+    return out;
+}
+
 function renderScavVillages() {
     const el = document.getElementById('scavVillageList');
-    el.innerHTML = villages.map(v => `
-        <label style="display:flex;align-items:center;gap:4px;background:#0f3460;padding:4px 8px;border-radius:4px;font-size:12px;cursor:pointer;min-width:auto;">
-            <input type="checkbox" class="scav-village-cb" value="${v.id}" checked onchange="syncScavSelection()">
-            ${v.name} (${v.x}|${v.y})
-        </label>
-    `).join('');
+    const saved = loadScavUnits();
+    el.innerHTML = villages.map(v => {
+        const allowed = saved[v.id] || SCAV_UNIT_LIST; // 기본: 4종 전부
+        const allowedSet = new Set(allowed);
+        const unitChecks = SCAV_UNIT_LIST.map(u => `
+            <label style="display:flex;align-items:center;gap:2px;font-size:11px;cursor:pointer;min-width:auto;">
+                <input type="checkbox" class="scav-unit-cb" value="${u}" ${allowedSet.has(u)?'checked':''} onchange="syncScavUnits()">
+                ${SCAV_UNIT_LABELS[u]}
+            </label>
+        `).join('');
+        return `
+            <div class="scav-village-row" data-vid="${v.id}" style="display:flex;align-items:center;gap:8px;background:#0f3460;padding:4px 8px;border-radius:4px;font-size:12px;width:100%;">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;min-width:auto;flex:1;">
+                    <input type="checkbox" class="scav-village-cb" value="${v.id}" checked onchange="syncScavSelection()">
+                    ${v.name} (${v.x}|${v.y})
+                </label>
+                <div style="display:flex;gap:6px;">${unitChecks}</div>
+            </div>
+        `;
+    }).join('');
+    // 가로 wrap → 세로 stack (병종 체크박스 있어 각 row가 높음)
+    el.style.flexDirection = 'column';
+    el.style.flexWrap = 'nowrap';
+    el.style.maxHeight = '240px';
+}
+
+// 병종 체크박스 변경 시 — localStorage 저장 + 큐 실행 중이면 서버 갱신
+let scavUnitsSyncTimer = null;
+function syncScavUnits() {
+    if (scavUnitsSyncTimer) clearTimeout(scavUnitsSyncTimer);
+    scavUnitsSyncTimer = setTimeout(async () => {
+        const unitsByVillage = getScavUnitsByVillage();
+        saveScavUnits(unitsByVillage);
+        try { await api('POST', '/scavenge/update-units', { unitsByVillage }); }
+        catch { /* 큐 없으면 무시 */ }
+    }, 300);
 }
 
 // 체크박스 변경 시 실행 중 큐에 즉시 반영 (실행 중일 때만)
@@ -1569,7 +1671,9 @@ async function runScavenge(auto) {
     results.innerHTML = '';
 
     try {
-        const data = await api('POST', '/scavenge/run', { villageIds: selectedIds, auto: !!auto });
+        const unitsByVillage = getScavUnitsByVillage();
+        saveScavUnits(unitsByVillage);
+        const data = await api('POST', '/scavenge/run', { villageIds: selectedIds, auto: !!auto, unitsByVillage });
         if (!data.success) {
             status.textContent = '실패: ' + (data.error || 'unknown');
             btn.disabled = false;
@@ -1990,6 +2094,295 @@ function updateServerBadge() {
         else badge.textContent = '';
     }).catch(() => {});
 }
+
+// ==========================================
+// 릴레이 공격
+// ==========================================
+const RELAY_UNIT_LIST = ['spear','sword','axe','spy','light','marcher','heavy','ram','catapult','knight','snob'];
+
+function renderRelaySourceVillage() {
+    const sel = document.getElementById('relaySourceVillage');
+    if (!sel) return;
+    sel.innerHTML = villages.map(v =>
+        `<option value="${v.id}">${v.name} (${v.x}|${v.y})</option>`
+    ).join('');
+    renderRelayTroopInputs();
+}
+
+function renderRelayTroopInputs() {
+    const el = document.getElementById('relayTroopInputs');
+    if (!el) return;
+    el.innerHTML = RELAY_UNIT_LIST.map(u => `
+        <label style="display:flex;align-items:center;gap:3px;font-size:12px;">
+            <span style="min-width:28px;color:#aaa;">${UNIT_NAMES[u] || u}</span>
+            <input type="number" class="relay-troop-input" data-unit="${u}" min="0" value="0" style="width:60px;">
+        </label>
+    `).join('');
+}
+
+function applyRelayTemplate() {
+    const tplId = document.getElementById('relayTemplate').value;
+    if (!tplId) return; // 직접 입력 모드 — 그대로
+    const tpl = (_templates || []).find(t => t.id === tplId);
+    if (!tpl) return;
+    document.querySelectorAll('.relay-troop-input').forEach(inp => {
+        const unit = inp.dataset.unit;
+        inp.value = tpl.troops?.[unit] || 0;
+    });
+}
+
+function getRelayTroops() {
+    const troops = {};
+    document.querySelectorAll('.relay-troop-input').forEach(inp => {
+        const n = parseInt(inp.value) || 0;
+        if (n > 0) troops[inp.dataset.unit] = n;
+    });
+    return troops;
+}
+
+function syncRelayTemplateOptions() {
+    const sel = document.getElementById('relayTemplate');
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— 직접 입력 —</option>' +
+        (_templates || []).map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+    if (cur) sel.value = cur;
+}
+
+async function addRelaySession() {
+    const sourceVillageId = parseInt(document.getElementById('relaySourceVillage').value);
+    const targetX = parseInt(document.getElementById('relayTargetX').value);
+    const targetY = parseInt(document.getElementById('relayTargetY').value);
+    const maxWaves = parseInt(document.getElementById('relayMaxWaves').value) || 5;
+    const troops = getRelayTroops();
+    const status = document.getElementById('relayStatus');
+
+    if (!sourceVillageId) { alert('출발 마을 선택'); return; }
+    if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) { alert('타겟 좌표 입력'); return; }
+    if (Object.keys(troops).length === 0) { alert('병력 입력 (템플릿 선택 또는 직접)'); return; }
+
+    status.textContent = '발사 준비 중...';
+    try {
+        const data = await api('POST', '/relay/start', {
+            sourceVillageId, targetX, targetY, troops, maxWaves,
+        });
+        if (!data.success) {
+            status.textContent = '실패: ' + (data.error || 'unknown');
+            return;
+        }
+        status.textContent = `세션 #${data.session.id} 추가됨`;
+        renderRelayStatus();
+    } catch (e) {
+        status.textContent = '통신 실패: ' + e.message;
+    }
+}
+
+async function stopRelaySession(sessionId) {
+    if (!confirm(`세션 #${sessionId} 정지?`)) return;
+    await api('POST', '/relay/stop', { sessionId });
+    renderRelayStatus();
+}
+
+async function stopAllRelay() {
+    if (!confirm('모든 릴레이 세션 정지?')) return;
+    await api('POST', '/relay/stop', {});
+    renderRelayStatus();
+}
+
+const RELAY_STATUS_LABEL = {
+    pending: '대기',
+    firing: '발사 중',
+    in_flight: '왕복 중',
+    returning: '복귀 중',
+    completed: '완료',
+    stopped: '정지',
+};
+
+async function renderRelayStatus() {
+    const el = document.getElementById('relaySessionList');
+    if (!el) return;
+    try {
+        const data = await api('GET', '/relay/status');
+        const sessions = data.sessions || [];
+        if (sessions.length === 0) {
+            el.innerHTML = '<div style="color:#666;font-size:12px;">활성 세션 없음</div>';
+            return;
+        }
+        el.innerHTML = sessions.map(s => {
+            const isActive = s.status !== 'completed' && s.status !== 'stopped';
+            const dot = isActive ? '🟢' : (s.status === 'completed' ? '✅' : '🔴');
+            const reason = s.stoppedReason ? ` (${s.stoppedReason})` : '';
+            const ageStr = s.lastSentAt ? `${Math.round((Date.now() - s.lastSentAt) / 1000)}s 전 발사` : '';
+            const stopBtn = isActive ? `<button class="btn btn-danger btn-small" onclick="stopRelaySession(${s.id})">정지</button>` : '';
+            const troopStr = Object.entries(s.troops).filter(([, n]) => n > 0).map(([u, n]) => `${UNIT_NAMES[u] || u}:${n}`).join(' ');
+            return `<div style="margin-bottom:6px;padding:8px;background:#0f3460;border-radius:4px;border-left:3px solid ${isActive ? '#27ae60' : '#555'};display:flex;align-items:center;gap:10px;">
+                <div style="flex:1;">
+                    <b>${dot} #${s.id} ${s.sourceVillageName} → (${s.targetX}|${s.targetY})</b>
+                    <span style="color:#aaa;font-size:11px;margin-left:8px;">웨이브 ${s.currentWave}/${s.maxWaves} · ${RELAY_STATUS_LABEL[s.status] || s.status}${reason}</span>
+                    <div style="font-size:11px;color:#888;margin-top:2px;">${troopStr} ${ageStr ? '· ' + ageStr : ''}</div>
+                </div>
+                ${stopBtn}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        el.innerHTML = `<div style="color:#e94560;font-size:12px;">상태 조회 실패: ${e.message}</div>`;
+    }
+}
+
+// 5초마다 상태 갱신
+setInterval(renderRelayStatus, 5000);
+
+// ==========================================
+// 서브 서버 (스캐빈징 전용)
+// ==========================================
+async function loadSubServerSelect() {
+    // /api/sub-servers는 매번 fresh 서버 목록 감지하여 반환
+    try {
+        const s = await api('GET', '/state');
+        const subData = await api('GET', '/sub-servers');
+        const available = subData.available || [];
+        const activeSubs = new Set((subData.subServers || []).map(x => x.server));
+        // 메인 + 이미 활성화된 서브 제외
+        const candidates = available.filter(srv => srv.server !== s.server && !activeSubs.has(srv.server));
+        const sel = document.getElementById('subServerSelect');
+        if (!sel) return;
+        const cur = sel.value;
+        if (candidates.length === 0) {
+            sel.innerHTML = '<option value="">— 추가 가능 서버 없음 —</option>';
+        } else {
+            sel.innerHTML = '<option value="">— 선택 —</option>' +
+                candidates.map(srv => `<option value="${srv.server}">${srv.label || srv.server}</option>`).join('');
+            if (cur) sel.value = cur;
+        }
+    } catch (e) { console.warn('[서브서버] 목록 로드 실패', e); }
+}
+
+async function addSubServer() {
+    const sel = document.getElementById('subServerSelect');
+    const server = sel.value;
+    if (!server) { alert('서버 선택'); return; }
+    sel.disabled = true;
+    try {
+        const data = await api('POST', '/sub-server/add', { server });
+        if (!data.success) {
+            alert('실패: ' + (data.error || 'unknown'));
+            return;
+        }
+        await renderSubServers();
+    } catch (e) {
+        alert('통신 실패: ' + e.message);
+    } finally {
+        sel.disabled = false;
+    }
+}
+
+async function removeSubServer(server) {
+    if (!confirm(`서브 서버 ${server} 종료 (탭 닫기)?`)) return;
+    await api('POST', '/sub-server/remove', { server });
+    await renderSubServers();
+    await loadSubServerSelect();
+}
+
+async function startSubScavenge(server) {
+    const card = document.getElementById('sub-card-' + server);
+    if (!card) return;
+    const villageIds = [...card.querySelectorAll('.sub-village-cb:checked')].map(cb => parseInt(cb.value));
+    if (villageIds.length === 0) { alert('마을 선택'); return; }
+
+    // 마을별 병종
+    const unitsByVillage = {};
+    card.querySelectorAll('.sub-village-row').forEach(row => {
+        const vid = parseInt(row.dataset.vid);
+        const sel = [...row.querySelectorAll('.sub-unit-cb:checked')].map(cb => cb.value);
+        unitsByVillage[vid] = sel;
+    });
+
+    try {
+        const data = await api('POST', `/sub-server/${server}/scavenge/start`, { villageIds, unitsByVillage });
+        if (!data.success) { alert('실패: ' + (data.error || 'unknown')); return; }
+    } catch (e) {
+        alert('통신 실패: ' + e.message);
+    }
+    await renderSubServers();
+}
+
+async function stopSubScavenge(server) {
+    await api('POST', `/sub-server/${server}/scavenge/stop`, {});
+    await renderSubServers();
+}
+
+async function renderSubServers() {
+    const el = document.getElementById('subServerList');
+    if (!el) return;
+    try {
+        const data = await api('GET', '/sub-servers');
+        const subs = data.subServers || [];
+        if (subs.length === 0) {
+            el.innerHTML = '<div style="color:#666;font-size:12px;">활성 서브 서버 없음</div>';
+            return;
+        }
+        // 각 서브의 마을 목록을 별도로 fetch
+        const cards = [];
+        for (const s of subs) {
+            const vData = await api('GET', `/sub-server/${s.server}/villages`).catch(() => ({ villages: [] }));
+            const villages = vData.villages || [];
+            const scav = s.scavenge;
+            const isRunning = scav && !scav.stopped;
+            const cfg = scav?.config || {};
+            const selectedSet = new Set(cfg.villageIds || villages.map(v => v.id)); // 기본: 전체
+            const ubvCfg = cfg.unitsByVillage || {};
+
+            const villageRows = villages.map(v => {
+                const allowed = ubvCfg[v.id] || SCAV_UNIT_LIST;
+                const allowedSet = new Set(allowed);
+                const checks = SCAV_UNIT_LIST.map(u => `
+                    <label style="display:flex;align-items:center;gap:2px;font-size:11px;">
+                        <input type="checkbox" class="sub-unit-cb" value="${u}" ${allowedSet.has(u)?'checked':''}>${SCAV_UNIT_LABELS[u]}
+                    </label>
+                `).join('');
+                return `<div class="sub-village-row" data-vid="${v.id}" style="display:flex;align-items:center;gap:8px;background:#0f3460;padding:4px 8px;border-radius:4px;font-size:12px;margin-bottom:4px;">
+                    <label style="flex:1;display:flex;align-items:center;gap:4px;cursor:pointer;">
+                        <input type="checkbox" class="sub-village-cb" value="${v.id}" ${selectedSet.has(v.id)?'checked':''}>
+                        ${v.name} (${v.x}|${v.y})
+                    </label>
+                    <div style="display:flex;gap:6px;">${checks}</div>
+                </div>`;
+            }).join('');
+
+            const captchaWarn = s.botProtection
+                ? `<div style="color:#e94560;margin-top:4px;font-size:12px;">🛑 캡차 감지: ${s.botProtection.type} — Chrome 탭에서 해결</div>`
+                : '';
+            const statusLine = scav
+                ? `${isRunning ? '🟢 실행 중' : '🔴 정지'} (마을 ${scav.size || 0}개)`
+                : '⚪ 큐 미시작';
+
+            cards.push(`<div id="sub-card-${s.server}" style="margin-bottom:12px;padding:10px;background:#1a1a2e;border-radius:6px;border-left:4px solid #3498db;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                    <b style="flex:1;">🌐 ${s.server}</b>
+                    <span style="font-size:12px;color:#aaa;">${statusLine}</span>
+                    <button class="btn btn-danger btn-small" onclick="removeSubServer('${s.server}')">탭 닫기</button>
+                </div>
+                ${captchaWarn}
+                <div style="margin-top:8px;max-height:200px;overflow-y:auto;">${villageRows || '<div style="color:#666;font-size:12px;">마을 없음</div>'}</div>
+                <div class="row" style="margin-top:8px;">
+                    <button class="btn btn-primary btn-small" onclick="startSubScavenge('${s.server}')">▶ 스캐빈징 시작</button>
+                    <button class="btn btn-danger btn-small" onclick="stopSubScavenge('${s.server}')">⏹ 정지</button>
+                </div>
+            </div>`);
+        }
+        el.innerHTML = cards.join('');
+    } catch (e) {
+        el.innerHTML = `<div style="color:#e94560;font-size:12px;">조회 실패: ${e.message}</div>`;
+    }
+}
+
+// 자동 갱신 (10초)
+setInterval(() => {
+    if (document.getElementById('tabAuto')?.classList.contains('tab-active') ||
+        document.querySelector('.tab-active')?.id === 'tabAuto') {
+        renderSubServers();
+    }
+}, 10000);
 
 // ==========================================
 init();

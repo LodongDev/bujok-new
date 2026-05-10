@@ -766,6 +766,8 @@ let villages = [];
 let availableTroops = {};
 const UNIT_ORDER = ['spear','sword','axe','archer','spy','light','marcher','heavy','ram','catapult','knight','snob'];
 const UNIT_NAMES = {spear:'창',sword:'검',axe:'도끼',archer:'궁',spy:'정찰',light:'경기',marcher:'기궁',heavy:'중기',ram:'램',catapult:'투석',knight:'기사',snob:'귀족'};
+// 분/필드 (TW 표준 속도, 월드 속도 1.0 기준 — en155 등). 부대 속도 = 가장 느린 병종 결정.
+const UNIT_SPEEDS = {spear:18,sword:22,axe:18,archer:18,spy:9,light:10,marcher:10,heavy:11,ram:30,catapult:30,knight:10,snob:35};
 
 // ==========================================
 // 초기화 + 상태 관리
@@ -970,6 +972,24 @@ function browserUtcOffsetSec() {
 // 서버 local "now" (display용 — ms 정밀 offset 사용)
 function serverLocalNow() {
     return new Date(Date.now() + serverUtcDiffMs);
+}
+
+// UTC ms → 서버 local 시간 문자열 (HH:MM:SS)
+function formatServerTime(utcMs) {
+    if (!utcMs) return '?';
+    const offsetMs = serverUtcDiffMs || (serverUtcDiff * 1000);
+    const d = new Date(utcMs + offsetMs);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+function formatTravelMs(ms) {
+    const sec = Math.floor(ms / 1000);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${h}시${m}분`;
+    if (m > 0) return `${m}분${s}초`;
+    return `${s}초`;
 }
 
 // 60초마다 서버 시간 sync — PC clock drift 모니터링 + display 정밀화
@@ -1819,13 +1839,34 @@ async function refreshList() {
             else if (remain > 0) countdown = formatMs(remain);
             else countdown = '실행 중...';
 
+            // 발사 시각 — actual (a.fireTime) 또는 추정 (병종 속도 기반)
+            // 실제 fire 후엔 a.fireTime 있음. 그 전엔 가장 느린 병종 속도 + 거리로 추정.
+            let fireDisplay = '';
+            if (a.fireTime) {
+                fireDisplay = `🚀 출발 ${formatServerTime(a.fireTime)}`;
+            } else if (a.sourceX != null && a.targetX != null) {
+                const dx = a.targetX - a.sourceX, dy = a.targetY - a.sourceY;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                let slowestMin = 0;
+                for (const [u, c] of Object.entries(a.troops || {})) {
+                    if (c > 0 && UNIT_SPEEDS[u] && UNIT_SPEEDS[u] > slowestMin) slowestMin = UNIT_SPEEDS[u];
+                }
+                if (slowestMin > 0) {
+                    const travelMs = dist * slowestMin * 60 * 1000;
+                    const estFire = a.arrivalTime - travelMs;
+                    const travelStr = formatTravelMs(travelMs);
+                    fireDisplay = `🚀 출발 ~${formatServerTime(estFire)} (이동 ${travelStr}, 추정)`;
+                }
+            }
+
             const soonClass = remain > 0 && remain < 60000 ? ' soon' : '';
             const canCancel = a.status === 'waiting' || a.status === 'preparing';
 
             return `<div class="scheduled-item ${a.status}">
                 <div class="scheduled-info">
                     <div class="title">${typeIcon} #${a.id} ${a.sourceName || a.sourceVillageId} → (${a.targetX}|${a.targetY})</div>
-                    <div class="detail">${troops} | 도착 ${new Date(a.arrivalTime).toLocaleTimeString()}</div>
+                    <div class="detail">${troops}</div>
+                    <div class="detail" style="font-family:monospace;">🎯 도착 ${formatServerTime(a.arrivalTime)} ${fireDisplay ? '· ' + fireDisplay : ''}</div>
                     <div class="countdown${soonClass}">${countdown}</div>
                 </div>
                 ${canCancel ? `<button class="btn btn-danger" onclick="cancelAttack(${a.id})">취소</button>` : ''}

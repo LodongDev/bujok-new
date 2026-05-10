@@ -995,14 +995,34 @@ async function selectServer(serverName) {
             log.info(`전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 UTC offset 감지 (TW가 표시하는 server time 기준 — 예약/트레인 시간 변환용)
+        // 서버 UTC offset 감지 — DST 포함한 실제 offset 계산 (server_utc_diff는 표준시라 DST 무시됨)
+        // 페이지 푸터의 "Server time: HH:MM:SS DD/MM/YYYY" 텍스트 파싱 → UTC 비교
         try {
-            const offset = await evaluate(state.cdp, state.botSessionId, `
-                (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
-                    ? (TribalWars.getGameData().server_utc_diff || 0) : 0
+            const result = await evaluate(state.cdp, state.botSessionId, `
+                (() => {
+                    const text = document.body?.innerText || '';
+                    const m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+                    if (m) {
+                        const h = +m[1], mn = +m[2], s = +m[3];
+                        const day = +m[4], mon = +m[5], yr = +m[6];
+                        const serverAsUtcMs = Date.UTC(yr, mon - 1, day, h, mn, s);
+                        return { serverAsUtcMs, browserNowMs: Date.now() };
+                    }
+                    // 폴백: gameData server_utc_diff (DST 미포함)
+                    const fb = (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
+                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0;
+                    return { fallbackOffset: fb };
+                })()
             `);
-            state.serverUtcDiff = parseInt(offset) || 0;
-            log.info(`서버 UTC offset: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+            if (result?.serverAsUtcMs && result?.browserNowMs) {
+                // serverAsUtcMs - browserNowMs ≈ offset 초 (반올림)
+                const diffSec = Math.round((result.serverAsUtcMs - result.browserNowMs) / 1000);
+                state.serverUtcDiff = diffSec;
+                log.info(`서버 UTC offset (실측): ${diffSec}초 (UTC${diffSec >= 0 ? '+' : ''}${(diffSec/3600).toFixed(1)})`);
+            } else if (result?.fallbackOffset != null) {
+                state.serverUtcDiff = parseInt(result.fallbackOffset) || 0;
+                log.warn(`서버 UTC offset (gameData 폴백, DST 미포함 가능): ${state.serverUtcDiff}초`);
+            }
         } catch (e) { log.warn(`서버 시간 감지 실패: ${e.message}`); }
 
         // 4. 스케줄러도 봇 탭 사용
@@ -2359,14 +2379,30 @@ async function autoSelectExistingServer(serverName) {
             log.info(`[자동연결] 전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`[자동연결] 서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 UTC offset 감지
+        // 서버 UTC offset 감지 — DST 포함 실측
         try {
-            const offset = await evaluate(state.cdp, state.botSessionId, `
-                (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
-                    ? (TribalWars.getGameData().server_utc_diff || 0) : 0
+            const result = await evaluate(state.cdp, state.botSessionId, `
+                (() => {
+                    const text = document.body?.innerText || '';
+                    const m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+                    if (m) {
+                        const h = +m[1], mn = +m[2], s = +m[3];
+                        const day = +m[4], mon = +m[5], yr = +m[6];
+                        const serverAsUtcMs = Date.UTC(yr, mon - 1, day, h, mn, s);
+                        return { serverAsUtcMs, browserNowMs: Date.now() };
+                    }
+                    const fb = (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
+                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0;
+                    return { fallbackOffset: fb };
+                })()
             `);
-            state.serverUtcDiff = parseInt(offset) || 0;
-            log.info(`[자동연결] 서버 UTC offset: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+            if (result?.serverAsUtcMs && result?.browserNowMs) {
+                state.serverUtcDiff = Math.round((result.serverAsUtcMs - result.browserNowMs) / 1000);
+                log.info(`[자동연결] 서버 UTC offset (실측): ${state.serverUtcDiff}초 (UTC+${(state.serverUtcDiff/3600).toFixed(1)})`);
+            } else if (result?.fallbackOffset != null) {
+                state.serverUtcDiff = parseInt(result.fallbackOffset) || 0;
+                log.warn(`[자동연결] 서버 UTC offset (gameData 폴백): ${state.serverUtcDiff}초`);
+            }
         } catch (e) { log.warn(`[자동연결] 서버 시간 감지 실패: ${e.message}`); }
 
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);

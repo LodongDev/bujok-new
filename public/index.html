@@ -205,7 +205,7 @@ label { min-width: 70px; }
 
     <div class="row">
         <label>타겟 좌표</label>
-        <input type="text" id="targetX" placeholder="X" style="width:60px">
+        <input type="text" id="targetX" placeholder="X (또는 X|Y 붙여넣기)" style="width:160px" oninput="splitCoordPaste(this,'targetY')">
         <span>|</span>
         <input type="text" id="targetY" placeholder="Y" style="width:60px">
     </div>
@@ -499,7 +499,7 @@ label { min-width: 70px; }
     </div>
     <div class="row">
         <label style="min-width:80px;">타겟 좌표</label>
-        <input id="relayTargetX" type="number" placeholder="X" style="width:80px;">
+        <input id="relayTargetX" type="text" placeholder="X (또는 X|Y 붙여넣기)" style="width:180px;" oninput="splitCoordPaste(this,'relayTargetY')">
         <span>|</span>
         <input id="relayTargetY" type="number" placeholder="Y" style="width:80px;">
     </div>
@@ -1032,6 +1032,17 @@ function applyFreeformToInput(srcId, dateInputId, msInputId) {
 function setDefaultTime() {
     const ms = Date.now() + 30 * 60000;  // 30분 후 (UTC ms)
     document.getElementById('arrivalTime').value = utcMsToServerLocalStr(ms);
+}
+
+// "X|Y" 또는 "X 570" 형식 입력 시 X/Y 자동 분리
+function splitCoordPaste(srcEl, ydstId) {
+    const v = (srcEl.value || '').trim();
+    // X|Y, X Y, X,Y 형식
+    const m = v.match(/^[\(\s]*(\d+)\s*[|,\s\/]\s*(\d+)[\)\s]*$/);
+    if (!m) return;
+    srcEl.value = m[1];
+    const ydst = document.getElementById(ydstId);
+    if (ydst) ydst.value = m[2];
 }
 
 // 서버 시계 (1초마다 갱신)

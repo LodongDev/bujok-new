@@ -234,7 +234,9 @@ label { min-width: 70px; }
         <input type="datetime-local" id="arrivalTime" step="1" style="width:200px;">
         <span style="font-size:11px;color:#666">ms:</span>
         <input type="number" id="arrivalMs" value="0" min="0" max="999" style="width:55px" placeholder="ms">
-        <span id="serverClock" style="font-size:11px;color:#3498db;margin-left:8px;"></span>
+        <span id="serverClock" style="font-size:11px;color:#3498db;margin-left:8px;font-family:monospace;"></span>
+        <button class="btn btn-small" type="button" onclick="manualSync()" title="서버 시간 즉시 재동기화" style="margin-left:4px;padding:2px 8px;font-size:11px;">🔄</button>
+        <span id="syncInfo" style="font-size:10px;color:#666;margin-left:4px;"></span>
     </div>
     <div class="row" style="margin-top: 6px;">
         <label>또는 텍스트</label>
@@ -976,9 +978,23 @@ async function syncServerTime() {
         const r = await api('GET', '/server-time-sync');
         if (r?.ok) {
             serverUtcDiffMs = r.offsetMs;
-            console.log('[server-sync] offset=' + Math.round(r.offsetMs) + 'ms latency=' + Math.round(r.latencyMs) + 'ms');
+            const info = document.getElementById('syncInfo');
+            if (info) {
+                const now = new Date();
+                const pad = n => String(n).padStart(2, '0');
+                info.textContent = `(sync ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}, lat ${Math.round(r.bestLatencyMs || r.latencyMs)}ms)`;
+            }
+            console.log('[server-sync] offset=' + Math.round(r.offsetMs) + 'ms bestLatency=' + Math.round(r.bestLatencyMs || r.latencyMs) + 'ms', r.samples ? 'samples=' + r.samples.map(s=>s.lat).join(',') : '');
+        } else {
+            console.warn('[server-sync] failed:', r?.error);
         }
     } catch (e) { console.warn('[server-sync] 실패', e); }
+}
+
+async function manualSync() {
+    const info = document.getElementById('syncInfo');
+    if (info) info.textContent = '(syncing...)';
+    await syncServerTime();
 }
 
 // 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS) → UTC ms timestamp

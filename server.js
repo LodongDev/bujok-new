@@ -1153,9 +1153,10 @@ function startServer() {
             try {
                 const result = await evaluate(state.cdp, state.botSessionId, `
                     (async () => {
+                        // 2회만 — 봇 탐지 회피 위해 트래픽 최소화
+                        // drift는 분당 ~1ms 정도만 변하므로 정밀도 충분
                         const samples = [];
-                        // 5회 시도 — 최저 latency 샘플이 가장 정확 (대칭 latency 가정)
-                        for (let i = 0; i < 5; i++) {
+                        for (let i = 0; i < 2; i++) {
                             const t0 = Date.now();
                             const r = await fetch('${baseUrl}/game.php?village=${villageId}&screen=scavenge_api&ajax=villages&village_ids%5B%5D=${villageId}', {
                                 headers: { 'TribalWars-Ajax': '1', 'X-Requested-With': 'XMLHttpRequest' },
@@ -1164,7 +1165,7 @@ function startServer() {
                             const text = await r.text();
                             const m = text.match(/"time_generated_ms":(\\d+)/);
                             if (m) samples.push({ serverMs: parseInt(m[1]), t0, t1, lat: t1 - t0 });
-                            if (i < 4) await new Promise(r => setTimeout(r, 80));
+                            if (i < 1) await new Promise(r => setTimeout(r, 80));
                         }
                         return samples;
                     })()

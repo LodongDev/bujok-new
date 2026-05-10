@@ -1106,9 +1106,8 @@ function updateServerClock() {
     el.textContent = `🕒 서버: ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${ms} (UTC${serverUtcDiff>=0?'+':''}${tzH})`;
 }
 setInterval(updateServerClock, 200);
-// 10분마다 ms 정밀 sync — 봇 탐지 회피 (drift는 분당 ~1ms 정도만 변함)
-// 발사 직전엔 scheduler가 자체적으로 다시 sync하므로 충분
-setInterval(syncServerTime, 600000);
+// 자동 sync 없음 — 시작 시 1회 + 수동 🔄 버튼만
+// 발사 직전엔 scheduler가 confirm 응답에서 time_generated 얻어 자동 sync (추가 요청 없음)
 
 // ==========================================
 // API 호출

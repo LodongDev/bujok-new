@@ -997,40 +997,24 @@ async function selectServer(serverName) {
             log.info(`전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 UTC offset 감지 — text + time_generated 같은 페이지에서 비교 → ±1s 정확
-        // text: "Server time: HH:MM:SS DD/MM/YYYY" (server local, 1s 정밀)
-        // time_generated: page 생성 시 server UTC ms (ms 정밀, 같은 순간)
-        // tz = serverLocalAsUtc - time_generated (clock drift 영향 없음, 둘 다 server clock)
+        // 서버 TZ — gameData.server_utc_diff (TW 자체값, 정확) 우선 사용
+        // 폴백으로 text+time_generated 비교 (ms 절단으로 ±1초 오차 가능)
         try {
             const result = await evaluate(state.cdp, state.botSessionId, `
                 (() => {
-                    const html = document.documentElement.innerHTML;
-                    const text = document.body?.innerText || '';
-                    const tg = html.match(/time_generated[\":]+(\\d+)/);
-                    // text format A (footer): "Server time: 05:42:31 10/05/2026"
-                    let m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
-                    if (!m) {
-                        // format B (HTML span): <span id="serverTime">19:11:34</span> <span id="serverDate">25/04/2026</span>
-                        const sm = html.match(/serverTime\">([\\d:]+)<\\/span>\\s*<span[^>]*serverDate\">([\\d\\/]+)/);
-                        if (sm) m = sm[1].match(/(\\d+):(\\d+):(\\d+)/).concat(sm[2].match(/(\\d+)\\/(\\d+)\\/(\\d+)/).slice(1));
+                    let gameTz = null;
+                    if (typeof TribalWars !== 'undefined' && TribalWars.getGameData) {
+                        gameTz = TribalWars.getGameData().server_utc_diff;
                     }
-                    if (!m || !tg) return { fallback: true };
-                    const localUtc = Date.UTC(+m[6], +m[5]-1, +m[4], +m[1], +m[2], +m[3]);
-                    return { localUtc, timeGeneratedMs: parseInt(tg[1]) };
+                    return { gameTz: gameTz != null ? parseInt(gameTz) : null };
                 })()
             `);
-            if (result?.localUtc && result?.timeGeneratedMs) {
-                // tz = localUtc - timeGeneratedMs (둘 다 server clock 기준 → drift 무관, 순수 tz)
-                state.serverUtcDiff = Math.round((result.localUtc - result.timeGeneratedMs) / 1000);
-                log.info(`서버 TZ offset: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+            if (result?.gameTz != null) {
+                state.serverUtcDiff = result.gameTz;
+                log.info(`서버 TZ offset (gameData): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
             } else {
-                // 폴백: gameData
-                const fb = await evaluate(state.cdp, state.botSessionId, `
-                    (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
-                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0
-                `);
-                state.serverUtcDiff = parseInt(fb) || 0;
-                log.warn(`서버 TZ offset (폴백): ${state.serverUtcDiff}초`);
+                state.serverUtcDiff = 0;
+                log.warn(`서버 TZ 감지 실패 — 0으로 기본값`);
             }
         } catch (e) { log.warn(`서버 시간 감지 실패: ${e.message}`); }
 
@@ -2450,33 +2434,23 @@ async function autoSelectExistingServer(serverName) {
             log.info(`[자동연결] 전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`[자동연결] 서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 TZ offset (text + time_generated 같은 페이지 비교 → drift 무관, 순수 tz)
+        // 서버 TZ — gameData.server_utc_diff (정확)
         try {
             const result = await evaluate(state.cdp, state.botSessionId, `
                 (() => {
-                    const html = document.documentElement.innerHTML;
-                    const text = document.body?.innerText || '';
-                    const tg = html.match(/time_generated[\":]+(\\d+)/);
-                    let m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
-                    if (!m) {
-                        const sm = html.match(/serverTime\">([\\d:]+)<\\/span>\\s*<span[^>]*serverDate\">([\\d\\/]+)/);
-                        if (sm) m = sm[1].match(/(\\d+):(\\d+):(\\d+)/).concat(sm[2].match(/(\\d+)\\/(\\d+)\\/(\\d+)/).slice(1));
+                    let gameTz = null;
+                    if (typeof TribalWars !== 'undefined' && TribalWars.getGameData) {
+                        gameTz = TribalWars.getGameData().server_utc_diff;
                     }
-                    if (!m || !tg) return { fallback: true };
-                    const localUtc = Date.UTC(+m[6], +m[5]-1, +m[4], +m[1], +m[2], +m[3]);
-                    return { localUtc, timeGeneratedMs: parseInt(tg[1]) };
+                    return { gameTz: gameTz != null ? parseInt(gameTz) : null };
                 })()
             `);
-            if (result?.localUtc && result?.timeGeneratedMs) {
-                state.serverUtcDiff = Math.round((result.localUtc - result.timeGeneratedMs) / 1000);
-                log.info(`[자동연결] 서버 TZ: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+            if (result?.gameTz != null) {
+                state.serverUtcDiff = result.gameTz;
+                log.info(`[자동연결] 서버 TZ (gameData): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
             } else {
-                const fb = await evaluate(state.cdp, state.botSessionId, `
-                    (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
-                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0
-                `);
-                state.serverUtcDiff = parseInt(fb) || 0;
-                log.warn(`[자동연결] 서버 TZ (폴백): ${state.serverUtcDiff}초`);
+                state.serverUtcDiff = 0;
+                log.warn(`[자동연결] TZ 감지 실패`);
             }
         } catch (e) { log.warn(`[자동연결] 서버 시간 감지 실패: ${e.message}`); }
 

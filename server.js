@@ -76,6 +76,7 @@ let state = {
     trainPlan: null, // [{building, unit, count}] — 저장된 양성 계획
     relayQueue: null,
     subServers: new Map(),  // serverName → SubServer (서브 서버, 스캐빈징만)
+    serverUtcDiff: 0,        // 서버 UTC offset (초) — UI 시간 변환용
     reportCollector: null,
     botLock: new BotLock(),
     botProtection: null,    // { detected: true, type: '...', at: timestamp }
@@ -994,6 +995,16 @@ async function selectServer(serverName) {
             log.info(`전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`서버 목록 감지 실패: ${e.message}`); }
 
+        // 서버 UTC offset 감지 (TW가 표시하는 server time 기준 — 예약/트레인 시간 변환용)
+        try {
+            const offset = await evaluate(state.cdp, state.botSessionId, `
+                (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
+                    ? (TribalWars.getGameData().server_utc_diff || 0) : 0
+            `);
+            state.serverUtcDiff = parseInt(offset) || 0;
+            log.info(`서버 UTC offset: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+        } catch (e) { log.warn(`서버 시간 감지 실패: ${e.message}`); }
+
         // 4. 스케줄러도 봇 탭 사용
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);
         state.scheduler.start();
@@ -1110,6 +1121,8 @@ function startServer() {
                 villageCount: state.villages.length,
                 userPaused: state.userPaused,
                 startedAt: state.startedAt,
+                serverUtcDiff: state.serverUtcDiff || 0,
+                serverNowMs: Date.now() + (state.serverUtcDiff || 0) * 1000,
                 error: state.error,
             });
             return;
@@ -2345,6 +2358,16 @@ async function autoSelectExistingServer(serverName) {
             if (r?.success) state.servers = r.servers || [];
             log.info(`[자동연결] 전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`[자동연결] 서버 목록 감지 실패: ${e.message}`); }
+
+        // 서버 UTC offset 감지
+        try {
+            const offset = await evaluate(state.cdp, state.botSessionId, `
+                (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
+                    ? (TribalWars.getGameData().server_utc_diff || 0) : 0
+            `);
+            state.serverUtcDiff = parseInt(offset) || 0;
+            log.info(`[자동연결] 서버 UTC offset: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+        } catch (e) { log.warn(`[자동연결] 서버 시간 감지 실패: ${e.message}`); }
 
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);
         state.scheduler.start();

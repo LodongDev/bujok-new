@@ -229,11 +229,17 @@ label { min-width: 70px; }
         <!-- JS가 채움 -->
     </div>
 
-    <div class="row" style="margin-top: 15px;">
-        <label>도착 시간</label>
-        <input type="datetime-local" id="arrivalTime" step="1">
+    <div class="row" style="margin-top: 15px;align-items:center;">
+        <label>도착 (서버시간)</label>
+        <input type="datetime-local" id="arrivalTime" step="1" style="width:200px;">
         <span style="font-size:11px;color:#666">ms:</span>
         <input type="number" id="arrivalMs" value="0" min="0" max="999" style="width:55px" placeholder="ms">
+        <span id="serverClock" style="font-size:11px;color:#3498db;margin-left:8px;"></span>
+    </div>
+    <div class="row" style="margin-top: 6px;">
+        <label>또는 텍스트</label>
+        <input type="text" id="arrivalFreeform" placeholder="today at 08:46:04:953 또는 tomorrow at 14:30:00" style="flex:1;max-width:380px;font-size:12px;" oninput="applyFreeformToInput('arrivalFreeform','arrivalTime','arrivalMs')">
+        <span style="font-size:11px;color:#888;">자동 채워짐</span>
     </div>
 
     <div class="row" style="margin-top: 15px;">
@@ -293,16 +299,25 @@ label { min-width: 70px; }
         </select>
     </div>
     <div class="row" id="trainTimeRow" style="display:none;">
-        <label>도착 시작</label>
+        <label>도착 시작 (서버시간)</label>
         <input type="datetime-local" id="trainArrivalStart" step="1">
         <label style="margin-left:10px;min-width:auto;">종료</label>
         <input type="datetime-local" id="trainArrivalEnd" step="1">
     </div>
+    <div class="row" id="trainTimeFreeRow" style="display:none;font-size:12px;">
+        <label>또는 텍스트</label>
+        <input type="text" id="trainArrivalStartFree" placeholder="시작: today at 08:46:04:953" style="flex:1;max-width:280px;" oninput="applyFreeformToInput('trainArrivalStartFree','trainArrivalStart')">
+        <input type="text" id="trainArrivalEndFree" placeholder="종료: tomorrow at 09:00:00" style="flex:1;max-width:280px;" oninput="applyFreeformToInput('trainArrivalEndFree','trainArrivalEnd')">
+    </div>
     <div class="row" id="trainNobleRow" style="display:none;">
-        <label>첫 도착</label>
+        <label>첫 도착 (서버시간)</label>
         <input type="datetime-local" id="trainNobleStart" step="1">
         <label style="margin-left:10px;min-width:auto;">간격(ms)</label>
         <input type="number" id="trainNobleSpacing" value="250" min="50" max="5000" style="width:80px;">
+    </div>
+    <div class="row" id="trainNobleFreeRow" style="display:none;font-size:12px;">
+        <label>또는 텍스트</label>
+        <input type="text" id="trainNobleStartFree" placeholder="today at 08:46:04:953" style="flex:1;max-width:380px;" oninput="applyFreeformToInput('trainNobleStartFree','trainNobleStart')">
     </div>
     <div id="trainSummary" style="margin: 10px 0; padding: 8px 12px; background: #0f3460; border-left: 3px solid #3498db; border-radius: 4px; font-size: 12px;">
         <span style="color:#aaa;">📊 요약:</span> 마을 0 × 타겟 0 × 웨이브 0 = <b style="color:#fff;">0개 공격</b>
@@ -769,7 +784,9 @@ async function checkState() {
         if (s.phase === 'select_server' && s.servers && s.servers.length > 0) {
             showServerList(s.servers);
         } else if (s.phase === 'ready') {
+            serverUtcDiff = parseInt(s.serverUtcDiff) || 0;
             setDefaultTime();
+            updateServerClock();
             await loadVillages();
             await loadTemplates();
             await syncQueueStates();   // 복원된 큐 상태를 UI에 반영
@@ -936,12 +953,96 @@ async function retryCaptcha() {
     }
 }
 
-function setDefaultTime() {
-    const now = new Date();
-    now.setMinutes(now.getMinutes() + 30);
-    const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-    document.getElementById('arrivalTime').value = local.toISOString().slice(0, 19);
+// ==========================================
+// 서버 시간 처리 — TW server_utc_diff 기반
+// ==========================================
+let serverUtcDiff = 0;  // 초 (서버 - UTC)
+
+function browserUtcOffsetSec() {
+    return -new Date().getTimezoneOffset() * 60;  // 양수=동쪽 (Korea = +32400)
 }
+
+// 서버 local "now"를 UTC view Date로 (toISOString() 의 YYYY-MM-DDTHH:MM:SS = 서버 local)
+function serverLocalNow() {
+    return new Date(Date.now() + serverUtcDiff * 1000);
+}
+
+// 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS) → UTC ms timestamp
+function serverLocalStrToUtcMs(s) {
+    if (!s) return null;
+    // datetime-local input value를 서버 local로 해석
+    // browser가 local로 파싱한 ms + (browserOffset - serverOffset) * 1000 = UTC ms (서버 local 기준)
+    const browserParsedMs = new Date(s).getTime();
+    if (isNaN(browserParsedMs)) return null;
+    return browserParsedMs + (browserUtcOffsetSec() - serverUtcDiff) * 1000;
+}
+
+// UTC ms → datetime-local 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS)
+function utcMsToServerLocalStr(ms) {
+    const d = new Date(ms + serverUtcDiff * 1000);
+    return d.toISOString().slice(0, 19);
+}
+
+// "today at HH:MM:SS:mmm" / "tomorrow at HH:MM:SS:mmm" / "HH:MM:SS:mmm" 파싱
+// 반환: { utcMs, ms } 또는 null
+function parseFreeformTime(text) {
+    if (!text) return null;
+    const t = text.trim().toLowerCase().replace(/\s+/g, ' ');
+    // (today|tomorrow|yesterday) at HH:MM:SS[:mmm]
+    let m = t.match(/^(today|tomorrow|yesterday)\s+at\s+(\d{1,2}):(\d{2}):(\d{2})(?::(\d{1,3}))?$/);
+    let dayShift = 0;
+    let h, mn, s, ms;
+    if (m) {
+        dayShift = m[1] === 'tomorrow' ? 1 : (m[1] === 'yesterday' ? -1 : 0);
+        h = +m[2]; mn = +m[3]; s = +m[4]; ms = m[5] ? +m[5] : 0;
+    } else {
+        // "HH:MM:SS[:mmm]" — 오늘 가정 (이미 지났으면 내일)
+        m = t.match(/^(\d{1,2}):(\d{2}):(\d{2})(?::(\d{1,3}))?$/);
+        if (!m) return null;
+        h = +m[1]; mn = +m[2]; s = +m[3]; ms = m[4] ? +m[4] : 0;
+    }
+    if (h > 23 || mn > 59 || s > 59 || ms > 999) return null;
+    // 서버 local now → 그 날의 Y/M/D
+    const serverNow = serverLocalNow();
+    let y = serverNow.getUTCFullYear();
+    let mo = serverNow.getUTCMonth();
+    let d = serverNow.getUTCDate() + dayShift;
+    // 서버 local datetime → UTC ms (서버 local로 해석된 시각의 진짜 UTC)
+    const serverLocalAsUtc = Date.UTC(y, mo, d, h, mn, s, ms);
+    let utcMs = serverLocalAsUtc - serverUtcDiff * 1000;
+    // dayShift=0이고 입력 시각이 이미 지났으면 내일로
+    if (dayShift === 0 && !text.match(/today|tomorrow|yesterday/i) && utcMs < Date.now()) {
+        utcMs += 24 * 3600 * 1000;
+    }
+    return { utcMs, ms };
+}
+
+// free-form 입력값을 datetime-local + ms 칸에 자동 채움
+function applyFreeformToInput(srcId, dateInputId, msInputId) {
+    const srcEl = document.getElementById(srcId);
+    const dst = document.getElementById(dateInputId);
+    const dstMs = msInputId ? document.getElementById(msInputId) : null;
+    if (!srcEl || !dst) return;
+    const r = parseFreeformTime(srcEl.value);
+    if (!r) return;
+    dst.value = utcMsToServerLocalStr(r.utcMs);
+    if (dstMs) dstMs.value = r.ms;
+}
+
+function setDefaultTime() {
+    const ms = Date.now() + 30 * 60000;  // 30분 후 (UTC ms)
+    document.getElementById('arrivalTime').value = utcMsToServerLocalStr(ms);
+}
+
+// 서버 시계 (1초마다 갱신)
+function updateServerClock() {
+    const el = document.getElementById('serverClock');
+    if (!el) return;
+    const d = serverLocalNow();
+    const pad = (n) => String(n).padStart(2, '0');
+    el.textContent = `🕒 서버: ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} (UTC${serverUtcDiff>=0?'+':''}${serverUtcDiff/3600})`;
+}
+setInterval(updateServerClock, 1000);
 
 // ==========================================
 // API 호출
@@ -1425,7 +1526,9 @@ async function autoNobleTrain() {
 function onTrainModeChange() {
     const mode = document.getElementById('trainMode').value;
     document.getElementById('trainTimeRow').style.display = mode === 'scheduled' ? '' : 'none';
+    document.getElementById('trainTimeFreeRow').style.display = mode === 'scheduled' ? '' : 'none';
     document.getElementById('trainNobleRow').style.display = mode === 'noble' ? '' : 'none';
+    document.getElementById('trainNobleFreeRow').style.display = mode === 'noble' ? '' : 'none';
     const btn = document.getElementById('trainFireBtn');
     if (mode === 'immediate') btn.textContent = '⚡ 즉시 발사';
     else if (mode === 'scheduled') btn.textContent = '⏰ 시간창 예약';
@@ -1487,24 +1590,26 @@ async function fireTrain() {
         return;
     }
 
-    // 예약 (window/noble) 모드
+    // 예약 (window/noble) 모드 — 입력은 서버 local time, UTC ms로 변환해서 전송
     let arrivalStartIso, arrivalEndIso, distMode, spacingMs;
     if (mode === 'noble') {
         const start = document.getElementById('trainNobleStart').value;
         if (!start) { alert('첫 도착시각 입력'); return; }
         spacingMs = parseInt(document.getElementById('trainNobleSpacing').value) || 250;
         const total = sourceVillageIds.length * targets.length * waves.length;
-        const startMs = new Date(start).getTime();
+        const startMs = serverLocalStrToUtcMs(start);
         arrivalStartIso = new Date(startMs).toISOString();
-        arrivalEndIso = new Date(startMs + spacingMs * total + 1000).toISOString(); // 종료는 충분히 뒤로
+        arrivalEndIso = new Date(startMs + spacingMs * total + 1000).toISOString();
         distMode = 'sequence';
     } else {
         const start = document.getElementById('trainArrivalStart').value;
         const end = document.getElementById('trainArrivalEnd').value;
         if (!start || !end) { alert('도착 시간 범위 입력'); return; }
-        if (new Date(end) <= new Date(start)) { alert('종료가 시작보다 늦어야 함'); return; }
-        arrivalStartIso = new Date(start).toISOString();
-        arrivalEndIso = new Date(end).toISOString();
+        const startMs = serverLocalStrToUtcMs(start);
+        const endMs = serverLocalStrToUtcMs(end);
+        if (endMs <= startMs) { alert('종료가 시작보다 늦어야 함'); return; }
+        arrivalStartIso = new Date(startMs).toISOString();
+        arrivalEndIso = new Date(endMs).toISOString();
         distMode = 'window';
     }
 
@@ -1577,7 +1682,8 @@ async function scheduleAttack() {
     const arrivalStr = document.getElementById('arrivalTime').value;
     const arrivalMs = parseInt(document.getElementById('arrivalMs').value || 0);
     if (!arrivalStr) { alert('도착 시간 입력'); return; }
-    const arrivalTime = new Date(arrivalStr).getTime() + arrivalMs;
+    // 서버 local로 입력된 datetime → UTC ms 변환
+    const arrivalTime = serverLocalStrToUtcMs(arrivalStr) + arrivalMs;
 
     if (arrivalTime < Date.now()) { alert('도착 시간이 이미 지남'); return; }
 

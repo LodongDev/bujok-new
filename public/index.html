@@ -972,7 +972,7 @@ function serverLocalNow() {
     return new Date(Date.now() + serverUtcDiffMs);
 }
 
-// 60초마다 서버 시간 ms 정밀 sync
+// 60초마다 서버 시간 sync — PC clock drift 모니터링 + display 정밀화
 async function syncServerTime() {
     try {
         const r = await api('GET', '/server-time-sync');
@@ -980,11 +980,11 @@ async function syncServerTime() {
             serverUtcDiffMs = r.offsetMs;
             const info = document.getElementById('syncInfo');
             if (info) {
-                const now = new Date();
-                const pad = n => String(n).padStart(2, '0');
-                info.textContent = `(sync ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}, lat ${Math.round(r.bestLatencyMs || r.latencyMs)}ms)`;
+                const drift = Math.round(r.clockDriftMs || 0);
+                const driftStr = Math.abs(drift) < 30 ? `<span style="color:#27ae60;">±${Math.abs(drift)}ms</span>` : `<span style="color:#e67e22;">${drift > 0 ? '+' : ''}${drift}ms</span>`;
+                info.innerHTML = `(drift ${driftStr}, lat ${Math.round(r.bestLatencyMs || r.latencyMs)}ms)`;
             }
-            console.log('[server-sync] offset=' + Math.round(r.offsetMs) + 'ms bestLatency=' + Math.round(r.bestLatencyMs || r.latencyMs) + 'ms', r.samples ? 'samples=' + r.samples.map(s=>s.lat).join(',') : '');
+            console.log('[server-sync] PC drift=' + Math.round(r.clockDriftMs) + 'ms, bestLatency=' + Math.round(r.bestLatencyMs) + 'ms, samples=' + (r.samples ? r.samples.map(s=>s.lat).join(',') : '?'));
         } else {
             console.warn('[server-sync] failed:', r?.error);
         }

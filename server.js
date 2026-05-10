@@ -997,33 +997,40 @@ async function selectServer(serverName) {
             log.info(`전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 UTC offset 감지 — DST 포함한 실제 offset 계산 (server_utc_diff는 표준시라 DST 무시됨)
-        // 페이지 푸터의 "Server time: HH:MM:SS DD/MM/YYYY" 텍스트 파싱 → UTC 비교
+        // 서버 UTC offset 감지 — text + time_generated 같은 페이지에서 비교 → ±1s 정확
+        // text: "Server time: HH:MM:SS DD/MM/YYYY" (server local, 1s 정밀)
+        // time_generated: page 생성 시 server UTC ms (ms 정밀, 같은 순간)
+        // tz = serverLocalAsUtc - time_generated (clock drift 영향 없음, 둘 다 server clock)
         try {
             const result = await evaluate(state.cdp, state.botSessionId, `
                 (() => {
+                    const html = document.documentElement.innerHTML;
                     const text = document.body?.innerText || '';
-                    const m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
-                    if (m) {
-                        const h = +m[1], mn = +m[2], s = +m[3];
-                        const day = +m[4], mon = +m[5], yr = +m[6];
-                        const serverAsUtcMs = Date.UTC(yr, mon - 1, day, h, mn, s);
-                        return { serverAsUtcMs, browserNowMs: Date.now() };
+                    const tg = html.match(/time_generated[\":]+(\\d+)/);
+                    // text format A (footer): "Server time: 05:42:31 10/05/2026"
+                    let m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+                    if (!m) {
+                        // format B (HTML span): <span id="serverTime">19:11:34</span> <span id="serverDate">25/04/2026</span>
+                        const sm = html.match(/serverTime\">([\\d:]+)<\\/span>\\s*<span[^>]*serverDate\">([\\d\\/]+)/);
+                        if (sm) m = sm[1].match(/(\\d+):(\\d+):(\\d+)/).concat(sm[2].match(/(\\d+)\\/(\\d+)\\/(\\d+)/).slice(1));
                     }
-                    // 폴백: gameData server_utc_diff (DST 미포함)
-                    const fb = (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
-                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0;
-                    return { fallbackOffset: fb };
+                    if (!m || !tg) return { fallback: true };
+                    const localUtc = Date.UTC(+m[6], +m[5]-1, +m[4], +m[1], +m[2], +m[3]);
+                    return { localUtc, timeGeneratedMs: parseInt(tg[1]) };
                 })()
             `);
-            if (result?.serverAsUtcMs && result?.browserNowMs) {
-                // serverAsUtcMs - browserNowMs ≈ offset 초 (반올림)
-                const diffSec = Math.round((result.serverAsUtcMs - result.browserNowMs) / 1000);
-                state.serverUtcDiff = diffSec;
-                log.info(`서버 UTC offset (실측): ${diffSec}초 (UTC${diffSec >= 0 ? '+' : ''}${(diffSec/3600).toFixed(1)})`);
-            } else if (result?.fallbackOffset != null) {
-                state.serverUtcDiff = parseInt(result.fallbackOffset) || 0;
-                log.warn(`서버 UTC offset (gameData 폴백, DST 미포함 가능): ${state.serverUtcDiff}초`);
+            if (result?.localUtc && result?.timeGeneratedMs) {
+                // tz = localUtc - timeGeneratedMs (둘 다 server clock 기준 → drift 무관, 순수 tz)
+                state.serverUtcDiff = Math.round((result.localUtc - result.timeGeneratedMs) / 1000);
+                log.info(`서버 TZ offset: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+            } else {
+                // 폴백: gameData
+                const fb = await evaluate(state.cdp, state.botSessionId, `
+                    (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
+                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0
+                `);
+                state.serverUtcDiff = parseInt(fb) || 0;
+                log.warn(`서버 TZ offset (폴백): ${state.serverUtcDiff}초`);
             }
         } catch (e) { log.warn(`서버 시간 감지 실패: ${e.message}`); }
 
@@ -1179,21 +1186,23 @@ function startServer() {
                     })()
                 `);
                 if (!result?.length) { json(res, { ok: false, error: 'time_generated_ms 못 찾음' }); return; }
-                // 가장 latency 낮은 샘플 사용 (비대칭 노이즈 적음)
+                // 가장 latency 낮은 샘플 사용 (대칭 가정에 가장 가까움)
                 result.sort((a, b) => a.lat - b.lat);
                 const best = result[0];
-                // serverMs는 server UTC ms (tz 미포함)
-                // server local UTC ms = serverMs + tz_sec*1000 (tz는 state.serverUtcDiff 기준 = tz+DST)
-                // 단, state.serverUtcDiff는 sec 단위 정밀이라 ms-precise drift 못 잡음 — sync로 정밀화
-                // browserAtServer = (t0+t1)/2 — 가장 latency 낮은 샘플로 정확도 ↑
+                // PC clock drift = serverMs - browserAtServer (server clock vs PC clock)
+                // 보통 PC가 NTP 동기화돼있으면 |drift| < 50ms (자주 < 10ms)
+                // tz 부분은 state.serverUtcDiff (text+time_generated 비교로 정확)
                 const browserAtServer = (best.t0 + best.t1) / 2;
-                const offsetMs = best.serverMs + (state.serverUtcDiff || 0) * 1000 - browserAtServer;
+                const clockDriftMs = best.serverMs - browserAtServer;
+                // 전체 offset (display용) = drift + tz (둘 다 ms)
+                const offsetMs = clockDriftMs + (state.serverUtcDiff || 0) * 1000;
                 state.serverUtcDiffMs = offsetMs;
                 state.lastSyncMs = Date.now();
-                log.info(`[time-sync] offset=${Math.round(offsetMs)}ms (3 samples, best latency=${best.lat}ms, all=${result.map(s=>s.lat).join(',')})`);
+                log.info(`[time-sync] PC drift=${Math.round(clockDriftMs)}ms (best latency=${best.lat}ms, samples=${result.map(s=>s.lat).join(',')})`);
                 json(res, {
                     ok: true,
                     offsetMs,
+                    clockDriftMs,
                     serverUtcDiffSec: state.serverUtcDiff || 0,
                     bestLatencyMs: best.lat,
                     samples: result.map(s => ({ lat: s.lat, serverMs: s.serverMs })),
@@ -2435,29 +2444,33 @@ async function autoSelectExistingServer(serverName) {
             log.info(`[자동연결] 전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`[자동연결] 서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 UTC offset 감지 — DST 포함 실측
+        // 서버 TZ offset (text + time_generated 같은 페이지 비교 → drift 무관, 순수 tz)
         try {
             const result = await evaluate(state.cdp, state.botSessionId, `
                 (() => {
+                    const html = document.documentElement.innerHTML;
                     const text = document.body?.innerText || '';
-                    const m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
-                    if (m) {
-                        const h = +m[1], mn = +m[2], s = +m[3];
-                        const day = +m[4], mon = +m[5], yr = +m[6];
-                        const serverAsUtcMs = Date.UTC(yr, mon - 1, day, h, mn, s);
-                        return { serverAsUtcMs, browserNowMs: Date.now() };
+                    const tg = html.match(/time_generated[\":]+(\\d+)/);
+                    let m = text.match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+                    if (!m) {
+                        const sm = html.match(/serverTime\">([\\d:]+)<\\/span>\\s*<span[^>]*serverDate\">([\\d\\/]+)/);
+                        if (sm) m = sm[1].match(/(\\d+):(\\d+):(\\d+)/).concat(sm[2].match(/(\\d+)\\/(\\d+)\\/(\\d+)/).slice(1));
                     }
-                    const fb = (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
-                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0;
-                    return { fallbackOffset: fb };
+                    if (!m || !tg) return { fallback: true };
+                    const localUtc = Date.UTC(+m[6], +m[5]-1, +m[4], +m[1], +m[2], +m[3]);
+                    return { localUtc, timeGeneratedMs: parseInt(tg[1]) };
                 })()
             `);
-            if (result?.serverAsUtcMs && result?.browserNowMs) {
-                state.serverUtcDiff = Math.round((result.serverAsUtcMs - result.browserNowMs) / 1000);
-                log.info(`[자동연결] 서버 UTC offset (실측): ${state.serverUtcDiff}초 (UTC+${(state.serverUtcDiff/3600).toFixed(1)})`);
-            } else if (result?.fallbackOffset != null) {
-                state.serverUtcDiff = parseInt(result.fallbackOffset) || 0;
-                log.warn(`[자동연결] 서버 UTC offset (gameData 폴백): ${state.serverUtcDiff}초`);
+            if (result?.localUtc && result?.timeGeneratedMs) {
+                state.serverUtcDiff = Math.round((result.localUtc - result.timeGeneratedMs) / 1000);
+                log.info(`[자동연결] 서버 TZ: ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+            } else {
+                const fb = await evaluate(state.cdp, state.botSessionId, `
+                    (typeof TribalWars !== 'undefined' && TribalWars.getGameData)
+                        ? (TribalWars.getGameData().server_utc_diff || 0) : 0
+                `);
+                state.serverUtcDiff = parseInt(fb) || 0;
+                log.warn(`[자동연결] 서버 TZ (폴백): ${state.serverUtcDiff}초`);
             }
         } catch (e) { log.warn(`[자동연결] 서버 시간 감지 실패: ${e.message}`); }
 

@@ -785,11 +785,13 @@ async function checkState() {
             showServerList(s.servers);
         } else if (s.phase === 'ready') {
             serverUtcDiff = parseInt(s.serverUtcDiff) || 0;
+            serverUtcDiffMs = parseInt(s.serverUtcDiffMs) || serverUtcDiff * 1000;
+            await syncServerTime();  // ms 정밀 sync — initial
             setDefaultTime();
             updateServerClock();
             await loadVillages();
             await loadTemplates();
-            await syncQueueStates();   // 복원된 큐 상태를 UI에 반영
+            await syncQueueStates();
             await loadSubServerSelect();
             await renderSubServers();
             startPolling();
@@ -954,32 +956,46 @@ async function retryCaptcha() {
 }
 
 // ==========================================
-// 서버 시간 처리 — TW server_utc_diff 기반
+// 서버 시간 처리 — TW gameData + ms 정밀 sync
 // ==========================================
-let serverUtcDiff = 0;  // 초 (서버 - UTC)
+let serverUtcDiff = 0;     // 초 (tz+DST 포함, sec 단위 — 입력 변환용)
+let serverUtcDiffMs = 0;   // ms 정밀 (sync 후 — clock display용)
 
 function browserUtcOffsetSec() {
-    return -new Date().getTimezoneOffset() * 60;  // 양수=동쪽 (Korea = +32400)
+    return -new Date().getTimezoneOffset() * 60;
 }
 
-// 서버 local "now"를 UTC view Date로 (toISOString() 의 YYYY-MM-DDTHH:MM:SS = 서버 local)
+// 서버 local "now" (display용 — ms 정밀 offset 사용)
 function serverLocalNow() {
-    return new Date(Date.now() + serverUtcDiff * 1000);
+    return new Date(Date.now() + serverUtcDiffMs);
+}
+
+// 60초마다 서버 시간 ms 정밀 sync
+async function syncServerTime() {
+    try {
+        const r = await api('GET', '/server-time-sync');
+        if (r?.ok) {
+            serverUtcDiffMs = r.offsetMs;
+            console.log('[server-sync] offset=' + Math.round(r.offsetMs) + 'ms latency=' + Math.round(r.latencyMs) + 'ms');
+        }
+    } catch (e) { console.warn('[server-sync] 실패', e); }
 }
 
 // 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS) → UTC ms timestamp
+// 입력은 sec 단위 offset 사용 (datetime-local은 어차피 1초 정밀)
 function serverLocalStrToUtcMs(s) {
     if (!s) return null;
-    // datetime-local input value를 서버 local로 해석
-    // browser가 local로 파싱한 ms + (browserOffset - serverOffset) * 1000 = UTC ms (서버 local 기준)
     const browserParsedMs = new Date(s).getTime();
     if (isNaN(browserParsedMs)) return null;
-    return browserParsedMs + (browserUtcOffsetSec() - serverUtcDiff) * 1000;
+    // 정밀: ms-precise offset 있으면 사용, 없으면 sec
+    const offsetMs = serverUtcDiffMs || (serverUtcDiff * 1000);
+    return browserParsedMs + browserUtcOffsetSec() * 1000 - offsetMs;
 }
 
 // UTC ms → datetime-local 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS)
 function utcMsToServerLocalStr(ms) {
-    const d = new Date(ms + serverUtcDiff * 1000);
+    const offsetMs = serverUtcDiffMs || (serverUtcDiff * 1000);
+    const d = new Date(ms + offsetMs);
     return d.toISOString().slice(0, 19);
 }
 
@@ -1045,15 +1061,19 @@ function splitCoordPaste(srcEl, ydstId) {
     if (ydst) ydst.value = m[2];
 }
 
-// 서버 시계 (1초마다 갱신)
+// 서버 시계 — 200ms마다 갱신 (부드럽게)
 function updateServerClock() {
     const el = document.getElementById('serverClock');
     if (!el) return;
     const d = serverLocalNow();
     const pad = (n) => String(n).padStart(2, '0');
-    el.textContent = `🕒 서버: ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} (UTC${serverUtcDiff>=0?'+':''}${serverUtcDiff/3600})`;
+    const ms = String(d.getUTCMilliseconds()).padStart(3, '0');
+    const tzH = (serverUtcDiff / 3600).toFixed(1).replace(/\.0$/, '');
+    el.textContent = `🕒 서버: ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${ms} (UTC${serverUtcDiff>=0?'+':''}${tzH})`;
 }
-setInterval(updateServerClock, 1000);
+setInterval(updateServerClock, 200);
+// 60초마다 ms 정밀 sync
+setInterval(syncServerTime, 60000);
 
 // ==========================================
 // API 호출

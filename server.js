@@ -76,7 +76,9 @@ let state = {
     trainPlan: null, // [{building, unit, count}] — 저장된 양성 계획
     relayQueue: null,
     subServers: new Map(),  // serverName → SubServer (서브 서버, 스캐빈징만)
-    serverUtcDiff: 0,        // 서버 UTC offset (초) — UI 시간 변환용
+    serverUtcDiff: 0,        // 서버 UTC offset (초, tz+DST 포함) — UI 시간 변환용
+    serverUtcDiffMs: 0,      // 같은 의미지만 ms 정밀 (time_generated_ms sync 후 갱신)
+    lastSyncMs: 0,
     reportCollector: null,
     botLock: new BotLock(),
     botProtection: null,    // { detected: true, type: '...', at: timestamp }
@@ -1142,9 +1144,66 @@ function startServer() {
                 userPaused: state.userPaused,
                 startedAt: state.startedAt,
                 serverUtcDiff: state.serverUtcDiff || 0,
+                serverUtcDiffMs: state.serverUtcDiffMs || ((state.serverUtcDiff || 0) * 1000),
                 serverNowMs: Date.now() + (state.serverUtcDiff || 0) * 1000,
                 error: state.error,
             });
+            return;
+        }
+
+        // GET /api/server-time-sync — ms 정밀 서버 시간 sync
+        // scavenge_api 응답의 time_generated_ms 사용 (캡처 검증)
+        if (pathname === '/api/server-time-sync' && req.method === 'GET') {
+            if (!state.botSessionId || !state.cdp || !state.villages?.length) {
+                json(res, { ok: false, error: '봇 세션 없음' }); return;
+            }
+            const villageId = state.villages[0].id;
+            const baseUrl = `https://${state.server}.tribalwars.net`;
+            try {
+                const result = await evaluate(state.cdp, state.botSessionId, `
+                    (async () => {
+                        const t0 = Date.now();
+                        const r = await fetch('${baseUrl}/game.php?village=${villageId}&screen=scavenge_api&ajax=villages&village_ids%5B%5D=${villageId}', {
+                            headers: { 'TribalWars-Ajax': '1', 'X-Requested-With': 'XMLHttpRequest' },
+                        });
+                        const t1 = Date.now();
+                        const text = await r.text();
+                        const m = text.match(/"time_generated_ms":(\\d+)/);
+                        return { serverMs: m ? parseInt(m[1]) : null, t0, t1 };
+                    })()
+                `);
+                if (!result?.serverMs) { json(res, { ok: false, error: 'time_generated_ms 못 찾음' }); return; }
+                // 서버는 요청 받고 처리 — 응답 시각 ≈ t0 + halfLatency
+                // serverMs = 서버가 응답 만들 때 server UTC ms
+                // 그 시점 browser time ≈ t0 + halfLatency
+                // offset (display용 서버local - browser UTC) = serverMs + serverTzOffset*1000 - (t0 + halfLat)
+                // 하지만 우리는 이미 텍스트로 tz 포함 offset 잡았음. 이걸 ms 정밀화만:
+                //   현재 offset = state.serverUtcDiffMs (또는 serverUtcDiff*1000)
+                //   serverMs는 UTC ms — TZ 포함 server local로 변환: serverMs + tz*1000
+                // tz offset 분리: 기존 state.serverUtcDiff (text에서 잡은 거, sec) 가 tz+drift 포함값
+                // 새 ms-precise offset = serverMs - browser UTC at same moment + tz_sec*1000
+                // 단순화: ms-precise full offset = (serverMs + tz_sec*1000) - browserAtSameMoment
+                // browserAtSameMoment ≈ (t0 + t1) / 2
+                const browserAtServer = (result.t0 + result.t1) / 2;
+                const tzSec = (state.serverUtcDiff || 0) - Math.round((Date.now() - (Date.now() + (state.serverUtcDiff || 0) * 1000)) / 1000); // tz only
+                // 단순화 — 기존 serverUtcDiff(sec)에서 tz 부분만 분리하기 어려움
+                // 새 ms 정밀 offset = (서버가 tz 포함해서 보내는 local ms) - browser UTC ms
+                // 하지만 time_generated_ms는 UTC. server local = UTC + tz
+                // TW gameData.server_utc_diff 가 tz (DST 미포함). 우리가 잡은 serverUtcDiff(sec)는 tz+DST 포함.
+                // → tz 부분 = serverUtcDiff (text 파싱 실측, DST 포함)
+                // 그래서 offsetMs = serverMs + serverUtcDiff*1000 - browserAtServer
+                const offsetMs = result.serverMs + (state.serverUtcDiff || 0) * 1000 - browserAtServer;
+                state.serverUtcDiffMs = offsetMs;
+                state.lastSyncMs = Date.now();
+                json(res, {
+                    ok: true,
+                    offsetMs,
+                    serverUtcDiffSec: state.serverUtcDiff || 0,
+                    latencyMs: result.t1 - result.t0,
+                });
+            } catch (e) {
+                json(res, { ok: false, error: e.message });
+            }
             return;
         }
 

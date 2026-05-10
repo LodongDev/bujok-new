@@ -2188,7 +2188,7 @@ async function runFarm(auto) {
         if (!data.success) {
             status.textContent = '실패: ' + (data.error || 'unknown');
         } else if (auto) {
-            status.textContent = `자동 동줍 실행 중 (${mode} 모드, 15~25분 주기)`;
+            status.textContent = `자동 동줍 실행 중 (${mode} 모드, 마을별 부대 복귀 시점 기준)`;
             document.getElementById('farmStopBtn').className = 'btn btn-danger btn-small';
         } else {
             status.textContent = `완료 — 총 ${data.grandTotal || 0}회 전송`;

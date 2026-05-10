@@ -1018,20 +1018,18 @@ async function manualSync() {
 }
 
 // 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS) → UTC ms timestamp
-// 입력은 sec 단위 offset 사용 (datetime-local은 어차피 1초 정밀)
+// TZ만 사용 (drift 제외) — drift 보정은 백엔드 scheduler에서 fire 시점에 적용
 function serverLocalStrToUtcMs(s) {
     if (!s) return null;
     const browserParsedMs = new Date(s).getTime();
     if (isNaN(browserParsedMs)) return null;
-    // 정밀: ms-precise offset 있으면 사용, 없으면 sec
-    const offsetMs = serverUtcDiffMs || (serverUtcDiff * 1000);
-    return browserParsedMs + browserUtcOffsetSec() * 1000 - offsetMs;
+    const tzMs = serverUtcDiff * 1000;
+    return browserParsedMs + browserUtcOffsetSec() * 1000 - tzMs;
 }
 
-// UTC ms → datetime-local 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS)
+// UTC ms → datetime-local 서버 local 문자열 (YYYY-MM-DDTHH:MM:SS) — TZ만
 function utcMsToServerLocalStr(ms) {
-    const offsetMs = serverUtcDiffMs || (serverUtcDiff * 1000);
-    const d = new Date(ms + offsetMs);
+    const d = new Date(ms + serverUtcDiff * 1000);
     return d.toISOString().slice(0, 19);
 }
 

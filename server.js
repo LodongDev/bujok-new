@@ -1198,6 +1198,12 @@ function startServer() {
                 const offsetMs = clockDriftMs + (state.serverUtcDiff || 0) * 1000;
                 state.serverUtcDiffMs = offsetMs;
                 state.lastSyncMs = Date.now();
+                // 스케줄러에 drift 전달 → 발사 시 보정
+                state.scheduler?.setDriftMs(clockDriftMs);
+                for (const sub of state.subServers.values()) {
+                    // 서브 서버 스케줄러도 (있으면)
+                    sub.scheduler?.setDriftMs?.(clockDriftMs);
+                }
                 log.info(`[time-sync] PC drift=${Math.round(clockDriftMs)}ms (best latency=${best.lat}ms, samples=${result.map(s=>s.lat).join(',')})`);
                 json(res, {
                     ok: true,

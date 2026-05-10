@@ -1980,18 +1980,22 @@ function startServer() {
         // ==========================================
         // 서브 서버 (스캐빈징 전용) — 메인과 격리, 자기 봇 탭 사용
         // ==========================================
-        // GET /api/sub-servers — 활성 서브 서버 목록 + 사용 가능 서버 목록 (매번 재감지)
+        // GET /api/sub-servers — 활성 서브 서버 목록 + 사용 가능 서버 목록
+        // 서버 목록은 5분 cache — 봇 탐지 회피 (UI는 10초마다 호출하지만 fetch는 5분당 1회)
         if (pathname === '/api/sub-servers' && req.method === 'GET') {
             const list = [];
             for (const sub of state.subServers.values()) list.push(sub.status());
-            // 항상 fresh 감지 (state.servers는 cache, 비어있을 수도 있음)
             let available = state.servers || [];
-            if (state.cdp && state.botSessionId) {
+            const now = Date.now();
+            const cacheValidFor = 5 * 60 * 1000; // 5분
+            const stale = !state.serversCachedAt || (now - state.serversCachedAt) > cacheValidFor;
+            if (stale && state.cdp && state.botSessionId) {
                 try {
                     const r = await detectServersFromGame(state.cdp, state.botSessionId);
                     if (r?.success && r.servers?.length) {
                         available = r.servers;
                         state.servers = available;
+                        state.serversCachedAt = now;
                     }
                 } catch (e) { log.warn(`[sub-servers] 감지 실패: ${e.message}`); }
             }

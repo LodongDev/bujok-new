@@ -520,16 +520,52 @@ async function attemptAutoSolveCaptcha() {
             // 위치 추정 폐기: iframe sessionId에 evaluate로 #checkbox.getBoundingClientRect() 직접 조회
             // 검증 실패 시 done.checkbox 박제 안 함 → 다음 tick 재시도
             if (!done.checkbox) {
+                // 진단 — iframe 상태 자세히 파악 (Node.js 로그만, TW 서버 영향 없음)
+                const iframeDiag = await evaluate(state.cdp, targetSession, `
+                    (() => {
+                        const all = [...document.querySelectorAll('iframe')];
+                        const hc = all.filter(f => (f.src||'').includes('hcaptcha.com'));
+                        return {
+                            totalIframes: all.length,
+                            hcCount: hc.length,
+                            hcDetails: hc.map(f => {
+                                const r = f.getBoundingClientRect();
+                                return {
+                                    src: (f.src||'').slice(0, 100),
+                                    x: Math.round(r.x), y: Math.round(r.y),
+                                    w: Math.round(r.width), h: Math.round(r.height),
+                                    visible: f.offsetParent !== null,
+                                    display: getComputedStyle(f).display,
+                                    visibility: getComputedStyle(f).visibility,
+                                };
+                            }),
+                        };
+                    })()
+                `).catch(() => null);
+                log.info(`[캡차진단] iframe 상태: ${JSON.stringify(iframeDiag)}`);
+
                 const iframeRect = await getElementRect(targetSession, `
                     document.querySelector('iframe[src*="hcaptcha.com"][src*="frame=checkbox"]')
                     || document.querySelector('iframe[src*="hcaptcha.com"]')
                 `);
+                if (!iframeRect) {
+                    log.info(`[캡차진단] iframeRect=null — (c) 단계 스킵 (이유: iframe 없음/숨김/0크기/음수좌표)`);
+                }
                 if (iframeRect) {
+                    log.info(`[캡차진단] iframeRect: (${Math.round(iframeRect.x)},${Math.round(iframeRect.y)}) ${Math.round(iframeRect.w)}x${Math.round(iframeRect.h)}`);
                     // 1) iframe CDP sessionId 찾기 (Target.attachedToTarget로 자동 attach됨)
                     let iframeSession = findIframeSession(['frame=checkbox', 'hcaptcha.com']);
+                    log.info(`[캡차진단] iframeSession 첫 시도: ${iframeSession ? 'OK (' + iframeSession.info.url.slice(0,60) + '...)' : 'null (Target.attachedToTarget 미발생)'}`);
                     if (!iframeSession) {
                         await discoverIframeTargets();
                         iframeSession = findIframeSession(['frame=checkbox', 'hcaptcha.com']);
+                        log.info(`[캡차진단] discoverIframeTargets 후 재시도: ${iframeSession ? 'OK' : 'null (Target.getTargets에도 hCaptcha 없음 — OOPIF 격리)'}`);
+                        // 전체 iframe sessions 목록 dump (디버그용)
+                        const allSessions = [...state.iframeSessions.entries()].map(([sid, info]) => ({
+                            sid: sid.slice(0, 12),
+                            url: (info.url || '').slice(0, 80),
+                        }));
+                        log.info(`[캡차진단] state.iframeSessions 전체 (${allSessions.length}개): ${JSON.stringify(allSessions.slice(0, 5))}${allSessions.length > 5 ? '...' : ''}`);
                     }
                     let target = null;
                     let cbInfo = null;
@@ -572,12 +608,16 @@ async function attemptAutoSolveCaptcha() {
                         };
                     }
                     // 사람처럼 살펴보고 클릭 (hCaptcha 봇 탐지 우회)
-                    // humanClick: 시작점 보정 + 근처 호버 + 미세 흔들림 + 정밀 클릭 + 클릭 후 이동
+                    log.info(`[캡차진단] humanClick 시작 → 타겟 (${Math.round(target.x)},${Math.round(target.y)})`);
+                    const clickStartMs = Date.now();
                     const afterPos = await mouse.humanClick(state.cdp, targetSession, lastMousePos, target);
+                    const clickElapsedMs = Date.now() - clickStartMs;
                     lastMousePos = afterPos || target;
+                    log.info(`[캡차진단] humanClick 완료 (${clickElapsedMs}ms 소요)`);
 
-                    // 4) 클릭 검증 — 2초 대기 후 iframe 안 aria-checked 재조회
+                    // 4) 클릭 검증 — 2초 대기 후 상태 재조회
                     await new Promise(r => setTimeout(r, 2000));
+                    // 검증: iframe sessionId 있으면 aria-checked, 없으면 페이지 상태 재진단
                     if (iframeSession) {
                         const verified = await evaluate(state.cdp, iframeSession.sid, `
                             (() => {
@@ -590,10 +630,29 @@ async function attemptAutoSolveCaptcha() {
                             done.checkbox = true;
                         } else {
                             log.warn(`[캡차] 체크박스 클릭 미반영 — 다음 tick 재시도`);
-                            // done.checkbox=false 유지 → 다음 tick에서 다시 시도
                         }
                     } else {
-                        // iframe session 없으면 검증 불가 — 페이지 전체 해제 검사로만 판단
+                        // iframe session 없음 — 페이지 상태 재진단으로 효과 추적
+                        const postClickDiag = await evaluate(state.cdp, targetSession, `
+                            (() => {
+                                const all = [...document.querySelectorAll('iframe')];
+                                const hc = all.filter(f => (f.src||'').includes('hcaptcha.com'));
+                                const challenge = all.find(f => (f.src||'').includes('hcaptcha.com/challenge'));
+                                const challengeR = challenge?.getBoundingClientRect();
+                                return {
+                                    hcCount: hc.length,
+                                    hasChallenge: !!challenge,
+                                    challengeVisible: challenge && challenge.offsetParent !== null && (challengeR?.height||0) > 100,
+                                    challengeSize: challengeR ? Math.round(challengeR.width) + 'x' + Math.round(challengeR.height) : null,
+                                    beginVisible: document.body?.innerText?.includes('Begin bot protection'),
+                                };
+                            })()
+                        `).catch(() => null);
+                        log.info(`[캡차진단] 클릭 후 상태: ${JSON.stringify(postClickDiag)}`);
+                        if (postClickDiag?.challengeVisible) {
+                            log.warn(`[캡차] 이미지 챌린지 등장 — 자동 풀이 불가, 수동 필요`);
+                        }
+                        // iframe session 없으면 sub-element 검증 불가 — 다음 tick 재시도 안 함
                         done.checkbox = true;
                     }
                 }

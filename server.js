@@ -571,10 +571,10 @@ async function attemptAutoSolveCaptcha() {
                             y: iframeRect.y + iframeRect.h * (0.40 + Math.random() * 0.20),
                         };
                     }
-                    // 인간 반응 시간 (2~4초)
-                    await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
-                    await mouse.moveAndClick(state.cdp, targetSession, lastMousePos, target);
-                    lastMousePos = target;
+                    // 사람처럼 살펴보고 클릭 (hCaptcha 봇 탐지 우회)
+                    // humanClick: 시작점 보정 + 근처 호버 + 미세 흔들림 + 정밀 클릭 + 클릭 후 이동
+                    const afterPos = await mouse.humanClick(state.cdp, targetSession, lastMousePos, target);
+                    lastMousePos = afterPos || target;
 
                     // 4) 클릭 검증 — 2초 대기 후 iframe 안 aria-checked 재조회
                     await new Promise(r => setTimeout(r, 2000));

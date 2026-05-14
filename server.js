@@ -154,6 +154,9 @@ async function injectCaptchaScripts(sessionId) {
 function setupIframeAutoAttach() {
     if (!state.cdp || setupIframeAutoAttach._installed) return;
     setupIframeAutoAttach._installed = true;
+    // executionContexts: sessionId → Map<contextId, {origin, name, auxData}>
+    // OOPIF는 Target.attachedToTarget 이벤트 안 와도 Runtime.executionContextCreated는 옴
+    state.executionContexts = new Map();
     state.cdp.on((method, params, sessionId) => {
         if (method === 'Target.attachedToTarget') {
             const ti = params.targetInfo || {};
@@ -163,12 +166,10 @@ function setupIframeAutoAttach() {
                     parentSessionId: sessionId,
                     targetId: ti.targetId,
                 });
-                // iframe도 auto-attach + 캡차 스크립트 주입
                 state.cdp.send('Target.setAutoAttach', {
                     autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
                 }, params.sessionId).catch(() => {});
                 state.cdp.send('Runtime.enable', {}, params.sessionId).catch(() => {});
-                // hCaptcha iframe이면 solver 주입
                 if ((ti.url || '').includes('hcaptcha.com')) {
                     log.info(`[캡차] hCaptcha iframe 감지 — solver 주입`);
                     injectCaptchaScripts(params.sessionId);
@@ -176,8 +177,41 @@ function setupIframeAutoAttach() {
             }
         } else if (method === 'Target.detachedFromTarget') {
             state.iframeSessions.delete(params.sessionId);
+        } else if (method === 'Runtime.executionContextCreated') {
+            // 모든 frame의 JS context — OOPIF 포함
+            const ctx = params.context || {};
+            let bySession = state.executionContexts.get(sessionId);
+            if (!bySession) {
+                bySession = new Map();
+                state.executionContexts.set(sessionId, bySession);
+            }
+            bySession.set(ctx.id, {
+                origin: ctx.origin,
+                name: ctx.name,
+                auxData: ctx.auxData,
+            });
+        } else if (method === 'Runtime.executionContextDestroyed') {
+            const bySession = state.executionContexts.get(sessionId);
+            if (bySession) bySession.delete(params.executionContextId);
+        } else if (method === 'Runtime.executionContextsCleared') {
+            state.executionContexts.delete(sessionId);
         }
     });
+}
+
+// 특정 sessionId 안에서 origin/url 매치하는 execution context id 찾기
+// OOPIF는 sub-session으로 안 와도 부모 session의 컨텍스트 리스트에 있을 수 있음
+function findExecutionContext(sessionId, urlSubstr) {
+    const bySession = state.executionContexts?.get(sessionId);
+    if (!bySession) return null;
+    for (const [ctxId, info] of bySession.entries()) {
+        const origin = info.origin || '';
+        const url = info.auxData?.frameId ? info.auxData.url || '' : '';
+        if (origin.includes(urlSubstr) || url.includes(urlSubstr)) {
+            return { contextId: ctxId, info };
+        }
+    }
+    return null;
 }
 
 async function enableAutoAttachOn(sessionId) {
@@ -560,12 +594,16 @@ async function attemptAutoSolveCaptcha() {
                         await discoverIframeTargets();
                         iframeSession = findIframeSession(['frame=checkbox', 'hcaptcha.com']);
                         log.info(`[캡차진단] discoverIframeTargets 후 재시도: ${iframeSession ? 'OK' : 'null (Target.getTargets에도 hCaptcha 없음 — OOPIF 격리)'}`);
-                        // 전체 iframe sessions 목록 dump (디버그용)
-                        const allSessions = [...state.iframeSessions.entries()].map(([sid, info]) => ({
-                            sid: sid.slice(0, 12),
-                            url: (info.url || '').slice(0, 80),
-                        }));
-                        log.info(`[캡차진단] state.iframeSessions 전체 (${allSessions.length}개): ${JSON.stringify(allSessions.slice(0, 5))}${allSessions.length > 5 ? '...' : ''}`);
+                    }
+                    // OOPIF 우회 시도 — Runtime.executionContextCreated 이벤트 기반
+                    // Target 이벤트 안 와도 ExecutionContext는 가끔 잡힘 (브라우저 버전에 따라)
+                    let hcContext = null;
+                    if (!iframeSession) {
+                        hcContext = findExecutionContext(targetSession, 'hcaptcha.com');
+                        const ctxList = [...(state.executionContexts?.get(targetSession)?.entries() || [])]
+                            .map(([id, info]) => ({ id, origin: info.origin, frameUrl: info.auxData?.url || '' }));
+                        log.info(`[캡차진단] executionContexts dump (${ctxList.length}개): ${JSON.stringify(ctxList.slice(0, 10))}`);
+                        log.info(`[캡차진단] hcaptcha execution context: ${hcContext ? 'FOUND (id=' + hcContext.contextId + ')' : 'null'}`);
                     }
                     let target = null;
                     let cbInfo = null;
@@ -599,6 +637,36 @@ async function attemptAutoSolveCaptcha() {
                             log.info(`[캡차] iframe #checkbox (${Math.round(cbInfo.x)},${Math.round(cbInfo.y)},${Math.round(cbInfo.w)}x${Math.round(cbInfo.h)}) → 절대 (${Math.round(target.x)},${Math.round(target.y)})`);
                         }
                     }
+                    // iframeSession 없어도 executionContext 잡혔으면 그걸로 #checkbox 조회
+                    if (!target && hcContext) {
+                        try {
+                            cbInfo = await evaluate(state.cdp, targetSession, `
+                                (() => {
+                                    const el = document.getElementById('checkbox');
+                                    if (!el) return { found: false };
+                                    const r = el.getBoundingClientRect();
+                                    return { found: true, x: r.x, y: r.y, w: r.width, h: r.height,
+                                             checked: el.getAttribute('aria-checked') === 'true' };
+                                })()
+                            `, { contextId: hcContext.contextId });
+                            if (cbInfo?.checked) {
+                                log.ok(`[캡차] ✅ #checkbox 이미 checked (executionContext 경유)`);
+                                done.checkbox = true;
+                                elapsed += interval;
+                                if (elapsed < maxElapsed) setTimeout(tick, interval + Math.floor(Math.random() * 1000));
+                                return;
+                            }
+                            if (cbInfo?.found && cbInfo.w > 0 && cbInfo.h > 0) {
+                                target = {
+                                    x: iframeRect.x + cbInfo.x + cbInfo.w * (0.3 + Math.random() * 0.4),
+                                    y: iframeRect.y + cbInfo.y + cbInfo.h * (0.3 + Math.random() * 0.4),
+                                };
+                                log.ok(`[캡차] ★ executionContext 경유 #checkbox 발견 (${Math.round(cbInfo.x)},${Math.round(cbInfo.y)},${Math.round(cbInfo.w)}x${Math.round(cbInfo.h)}) → 절대 (${Math.round(target.x)},${Math.round(target.y)})`);
+                            }
+                        } catch (e) {
+                            log.warn(`[캡차진단] executionContext evaluate 실패: ${e.message}`);
+                        }
+                    }
                     if (!target) {
                         // fallback: iframe 안 접근 실패 — 표준 hCaptcha 레이아웃 (좌측 24px 중심)
                         log.warn(`[캡차] iframe 안 #checkbox 조회 실패 — fallback 좌표 (iframeSession=${!!iframeSession}, cbInfo=${JSON.stringify(cbInfo)})`);
@@ -627,7 +695,7 @@ async function attemptAutoSolveCaptcha() {
 
                     // 4) 클릭 검증 — 2초 대기 후 상태 재조회
                     await new Promise(r => setTimeout(r, 2000));
-                    // 검증: iframe sessionId 있으면 aria-checked, 없으면 페이지 상태 재진단
+                    // 검증 우선순위: iframeSession > hcContext > 페이지 상태
                     if (iframeSession) {
                         const verified = await evaluate(state.cdp, iframeSession.sid, `
                             (() => {
@@ -640,6 +708,20 @@ async function attemptAutoSolveCaptcha() {
                             done.checkbox = true;
                         } else {
                             log.warn(`[캡차] 체크박스 클릭 미반영 — 다음 tick 재시도`);
+                        }
+                    } else if (hcContext) {
+                        // executionContext 경유 검증
+                        const verified = await evaluate(state.cdp, targetSession, `
+                            (() => {
+                                const el = document.getElementById('checkbox');
+                                return el ? el.getAttribute('aria-checked') === 'true' : false;
+                            })()
+                        `, { contextId: hcContext.contextId }).catch(() => false);
+                        if (verified) {
+                            log.ok(`[캡차] ✅ 체크박스 클릭 성공 (executionContext aria-checked=true)`);
+                            done.checkbox = true;
+                        } else {
+                            log.warn(`[캡차] (executionContext 경유) 체크박스 클릭 미반영 — 재시도`);
                         }
                     } else {
                         // iframe session 없음 — 페이지 상태 재진단으로 효과 추적

@@ -610,7 +610,17 @@ async function attemptAutoSolveCaptcha() {
                     // 사람처럼 살펴보고 클릭 (hCaptcha 봇 탐지 우회)
                     log.info(`[캡차진단] humanClick 시작 → 타겟 (${Math.round(target.x)},${Math.round(target.y)})`);
                     const clickStartMs = Date.now();
-                    const afterPos = await mouse.humanClick(state.cdp, targetSession, lastMousePos, target);
+                    // 15초 타임아웃 — CDP가 광고 iframe 다수로 느려진 경우 hang 방지
+                    let afterPos = null;
+                    try {
+                        afterPos = await Promise.race([
+                            mouse.humanClick(state.cdp, targetSession, lastMousePos, target),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('humanClick timeout 15s')), 15000)),
+                        ]);
+                    } catch (e) {
+                        log.warn(`[캡차진단] humanClick 타임아웃/실패: ${e.message} — fallback 단순 클릭 시도`);
+                        try { await mouse.click(state.cdp, targetSession, target.x, target.y); } catch {}
+                    }
                     const clickElapsedMs = Date.now() - clickStartMs;
                     lastMousePos = afterPos || target;
                     log.info(`[캡차진단] humanClick 완료 (${clickElapsedMs}ms 소요)`);

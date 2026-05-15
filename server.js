@@ -220,7 +220,10 @@ async function enableAutoAttachOn(sessionId) {
     await state.cdp.send('Target.setAutoAttach', {
         autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
     }, sessionId).catch(() => {});
-    // 이 세션에도 캡차 스크립트 자동 주입 (모든 미래 페이지 로드에서 실행)
+    // Runtime.enable — executionContextCreated 이벤트 받기 위해 필수
+    // (in-process iframe + site isolation 비활성화로 OOPIF 잡기)
+    await state.cdp.send('Runtime.enable', {}, sessionId).catch(() => {});
+    await state.cdp.send('Page.enable', {}, sessionId).catch(() => {});
     await injectCaptchaScripts(sessionId);
 }
 

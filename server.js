@@ -1151,26 +1151,42 @@ async function selectServer(serverName) {
             log.info(`전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 TZ — gameData.server_utc_diff (TW 자체값, 정확) 우선 사용
-        // 폴백으로 text+time_generated 비교 (ms 절단으로 ±1초 오차 가능)
-        try {
-            const result = await evaluate(state.cdp, state.botSessionId, `
-                (() => {
-                    let gameTz = null;
-                    if (typeof TribalWars !== 'undefined' && TribalWars.getGameData) {
-                        gameTz = TribalWars.getGameData().server_utc_diff;
-                    }
-                    return { gameTz: gameTz != null ? parseInt(gameTz) : null };
-                })()
-            `);
-            if (result?.gameTz != null) {
-                state.serverUtcDiff = result.gameTz;
-                log.info(`서버 TZ offset (gameData): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
-            } else {
-                state.serverUtcDiff = 0;
-                log.warn(`서버 TZ 감지 실패 — 0으로 기본값`);
-            }
-        } catch (e) { log.warn(`서버 시간 감지 실패: ${e.message}`); }
+        // 서버 TZ — 재시도 + text fallback (페이지 로딩 중일 수 있음)
+        let tzDetected2 = false;
+        for (let attempt = 0; attempt < 5 && !tzDetected2; attempt++) {
+            try {
+                if (attempt > 0) await sleep(1500);
+                const result = await evaluate(state.cdp, state.botSessionId, `
+                    (() => {
+                        let gameTz = null;
+                        if (typeof TribalWars !== 'undefined' && TribalWars.getGameData) {
+                            gameTz = TribalWars.getGameData().server_utc_diff;
+                        }
+                        let textTz = null;
+                        if (gameTz == null) {
+                            const m = (document.body?.innerText || '').match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+                            if (m) {
+                                const localUtc = Date.UTC(+m[6], +m[5]-1, +m[4], +m[1], +m[2], +m[3]);
+                                textTz = Math.round((localUtc - Date.now()) / 1000);
+                            }
+                        }
+                        return { gameTz: gameTz != null ? parseInt(gameTz) : null, textTz };
+                    })()
+                `);
+                if (result?.gameTz != null) {
+                    state.serverUtcDiff = result.gameTz;
+                    log.info(`서버 TZ (gameData, ${attempt + 1}회): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+                    tzDetected2 = true;
+                } else if (result?.textTz != null) {
+                    state.serverUtcDiff = result.textTz;
+                    log.info(`서버 TZ (text fallback, ${attempt + 1}회): ${state.serverUtcDiff}초`);
+                    tzDetected2 = true;
+                }
+            } catch (e) { log.warn(`TZ 시도 ${attempt + 1} 실패: ${e.message}`); }
+        }
+        if (!tzDetected2) {
+            log.err(`🛑 서버 TZ 감지 실패 (5회 시도) — UI 시간 표시 부정확 가능`);
+        }
 
         // 4. 스케줄러도 봇 탭 사용
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);
@@ -2593,25 +2609,44 @@ async function autoSelectExistingServer(serverName) {
             log.info(`[자동연결] 전체 서버 ${state.servers.length}개 감지 (서브 추가용)`);
         } catch (e) { log.warn(`[자동연결] 서버 목록 감지 실패: ${e.message}`); }
 
-        // 서버 TZ — gameData.server_utc_diff (정확)
-        try {
-            const result = await evaluate(state.cdp, state.botSessionId, `
-                (() => {
-                    let gameTz = null;
-                    if (typeof TribalWars !== 'undefined' && TribalWars.getGameData) {
-                        gameTz = TribalWars.getGameData().server_utc_diff;
-                    }
-                    return { gameTz: gameTz != null ? parseInt(gameTz) : null };
-                })()
-            `);
-            if (result?.gameTz != null) {
-                state.serverUtcDiff = result.gameTz;
-                log.info(`[자동연결] 서버 TZ (gameData): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
-            } else {
-                state.serverUtcDiff = 0;
-                log.warn(`[자동연결] TZ 감지 실패`);
-            }
-        } catch (e) { log.warn(`[자동연결] 서버 시간 감지 실패: ${e.message}`); }
+        // 서버 TZ — gameData.server_utc_diff 우선, 안 되면 text 파싱 fallback
+        // 재시도 (페이지 로딩 중일 수 있음)
+        let tzDetected = false;
+        for (let attempt = 0; attempt < 5 && !tzDetected; attempt++) {
+            try {
+                if (attempt > 0) await sleep(1500);
+                const result = await evaluate(state.cdp, state.botSessionId, `
+                    (() => {
+                        let gameTz = null;
+                        if (typeof TribalWars !== 'undefined' && TribalWars.getGameData) {
+                            gameTz = TribalWars.getGameData().server_utc_diff;
+                        }
+                        // text fallback (footer "Server time: HH:MM:SS DD/MM/YYYY")
+                        let textTz = null;
+                        if (gameTz == null) {
+                            const m = (document.body?.innerText || '').match(/Server time:\\s*(\\d{1,2}):(\\d{2}):(\\d{2})\\s+(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
+                            if (m) {
+                                const localUtc = Date.UTC(+m[6], +m[5]-1, +m[4], +m[1], +m[2], +m[3]);
+                                textTz = Math.round((localUtc - Date.now()) / 1000);
+                            }
+                        }
+                        return { gameTz: gameTz != null ? parseInt(gameTz) : null, textTz };
+                    })()
+                `);
+                if (result?.gameTz != null) {
+                    state.serverUtcDiff = result.gameTz;
+                    log.info(`[자동연결] 서버 TZ (gameData, ${attempt + 1}회): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+                    tzDetected = true;
+                } else if (result?.textTz != null) {
+                    state.serverUtcDiff = result.textTz;
+                    log.info(`[자동연결] 서버 TZ (text fallback, ${attempt + 1}회): ${state.serverUtcDiff}초 (UTC${state.serverUtcDiff >= 0 ? '+' : ''}${state.serverUtcDiff/3600})`);
+                    tzDetected = true;
+                }
+            } catch (e) { log.warn(`[자동연결] TZ 시도 ${attempt + 1} 실패: ${e.message}`); }
+        }
+        if (!tzDetected) {
+            log.err(`🛑 [자동연결] TZ 감지 5회 모두 실패 — UI 시간 표시 부정확 가능. state.serverUtcDiff 이전값 유지: ${state.serverUtcDiff}`);
+        }
 
         state.scheduler = new Scheduler(state.cdp, state.botSessionId, baseUrl);
         state.scheduler.start();
